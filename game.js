@@ -31,13 +31,26 @@
   resize();
 
   // --- Perspective Constants ---
-  const HORIZON = 0.38;        // horizon line ratio (from top)
-  const CAM_HEIGHT = 1200;     // virtual camera height
-  const ROAD_HALF_W = 1.5;     // half-width of road in world units
-  const DRAW_DIST = 300;       // how far ahead we render segments
-  const SEG_LENGTH = 5;        // world-unit length per segment
+  const HORIZON_RATIO = 0.35;
+  const ROAD_HALF_W = 1.5;
+  const DRAW_DIST = 200;
+  const SEG_LENGTH = 4;
   const TOTAL_SEGS = Math.ceil(DRAW_DIST / SEG_LENGTH);
   const LANE_COUNT = 3;
+  const PLAYER_Z = 10;
+
+  // Projection: returns screen x, y and pixels-per-world-unit (ppu)
+  // wx = world lateral (-ROAD_HALF_W..+ROAD_HALF_W), wz = depth ahead
+  function project(wx, wz) {
+    if (wz < 0.5) wz = 0.5;
+    const horizonY = H * HORIZON_RATIO;
+    const fov = W * 0.95;
+    const depthScale = H * 2.5;
+    const ppu = fov / wz;
+    const sx = W / 2 + wx * ppu;
+    const sy = horizonY + depthScale / wz;
+    return { x: sx, y: sy, ppu: ppu };
+  }
 
   // --- Storage ---
   function loadData() {
@@ -72,8 +85,7 @@
   let state = STATE.MENU;
   let data = getData();
 
-  // Player
-  let playerX = 0;       // -1 to 1 (road position)
+  let playerX = 0;
   let playerTargetX = 0;
   let playerSpeed, gameTime, score, distance;
   let speedIncrement;
@@ -82,38 +94,15 @@
   let pedalAngle = 0;
   let playerBob = 0;
 
-  // World objects (z = distance ahead of player)
   let worldObstacles = [];
   let worldItems = [];
   let particles = [];
 
-  // Spawn
   let spawnTimer, spawnInterval;
-  let worldZ = 0; // total distance traveled
+  let worldZ = 0;
 
-  // Touch
   let touchStartX = null;
   let isDragging = false;
-
-  // --- Projection ---
-  // Projects a world point (wx, wz) to screen coordinates
-  // wx: lateral position (-ROAD_HALF_W to +ROAD_HALF_W)
-  // wz: distance ahead of camera
-  function project(wx, wz) {
-    if (wz <= 0) wz = 0.01;
-    const scale = CAM_HEIGHT / wz;
-    const horizonY = H * HORIZON;
-    const sx = W / 2 + wx * scale * (W * 0.28);
-    const sy = horizonY + (1.0 / wz) * CAM_HEIGHT * (H * 0.35);
-    return { x: sx, y: sy, scale: scale };
-  }
-
-  // Road width at a given z
-  function roadScreenWidth(wz) {
-    if (wz <= 0) wz = 0.01;
-    const scale = CAM_HEIGHT / wz;
-    return ROAD_HALF_W * 2 * scale * (W * 0.28);
-  }
 
   // --- Init ---
   function initGame() {
@@ -130,18 +119,15 @@
     pedalAngle = 0;
     playerBob = 0;
     worldZ = 0;
-
     worldObstacles = [];
     worldItems = [];
     particles = [];
-
     spawnTimer = 0;
     spawnInterval = 60;
   }
 
   // --- Spawn ---
   function laneToX(lane) {
-    // lane 0,1,2 -> x positions
     return (lane - 1) * (ROAD_HALF_W * 0.6);
   }
 
@@ -160,8 +146,8 @@
       type: type,
       lane: lane,
       carSpeed: type === "car" ? playerSpeed * 0.3 : 0,
-      hitW: type === "car" ? 0.45 : 0.3,
-      hitD: type === "car" ? 0.8 : 0.4,
+      hitW: type === "car" ? 0.5 : 0.35,
+      hitD: type === "car" ? 1.2 : 0.8,
       carColor: ["#E53935", "#1E88E5", "#43A047", "#FB8C00", "#8E24AA"][Math.floor(Math.random() * 5)],
     });
   }
@@ -178,7 +164,7 @@
     });
   }
 
-  // --- Particles ---
+  // --- Particles (screen space) ---
   function addParticles(sx, sy, color, count) {
     for (let i = 0; i < count; i++) {
       particles.push({
@@ -205,12 +191,10 @@
     pedalAngle += playerSpeed * 0.07;
     playerBob = Math.sin(gameTime * 0.15) * 1.5;
 
-    // Player lateral movement
     const dx = playerTargetX - playerX;
     playerX += dx * 0.12;
     playerX = Math.max(-1, Math.min(1, playerX));
 
-    // Spawn
     spawnTimer++;
     const adjInterval = Math.max(25, spawnInterval - gameTime * 0.008);
     if (spawnTimer >= adjInterval) {
@@ -219,30 +203,24 @@
       if (Math.random() < 0.5) spawnItem();
     }
 
-    // World position of player (in road coords)
     const pWorldX = playerX * ROAD_HALF_W * 0.8;
-    const pWorldZ = 8; // player is at z=8 from camera
 
     // Update obstacles
     for (let i = worldObstacles.length - 1; i >= 0; i--) {
       const o = worldObstacles[i];
       o.z -= dz - (o.carSpeed * 0.15);
-      if (o.z < -5) {
-        worldObstacles.splice(i, 1);
-        continue;
-      }
+      if (o.z < -5) { worldObstacles.splice(i, 1); continue; }
 
-      // Collision check (simple box in world space)
-      const dzDiff = Math.abs(o.z - pWorldZ);
+      const dzDiff = Math.abs(o.z - PLAYER_Z);
       const dxDiff = Math.abs(o.x - pWorldX);
-      if (dzDiff < o.hitD && dxDiff < o.hitW * 0.7) {
+      if (dzDiff < o.hitD && dxDiff < o.hitW) {
         if (shieldActive) {
           shieldActive = false;
           const p = project(o.x, o.z);
           addParticles(p.x, p.y, "#00E5FF", 15);
           worldObstacles.splice(i, 1);
         } else {
-          const p = project(pWorldX, pWorldZ);
+          const p = project(pWorldX, PLAYER_Z);
           addParticles(p.x, p.y, "#FF5252", 30);
           state = STATE.GAMEOVER;
           score = Math.floor(distance * 10) + sessionCoins * 5;
@@ -258,13 +236,11 @@
       const it = worldItems[i];
       it.z -= dz;
       it.bobPhase += 0.06;
-      if (it.z < -5) {
-        worldItems.splice(i, 1);
-        continue;
-      }
-      const dzDiff = Math.abs(it.z - pWorldZ);
+      if (it.z < -5) { worldItems.splice(i, 1); continue; }
+
+      const dzDiff = Math.abs(it.z - PLAYER_Z);
       const dxDiff = Math.abs(it.x - pWorldX);
-      if (dzDiff < 1.2 && dxDiff < 0.4) {
+      if (dzDiff < 1.5 && dxDiff < 0.45) {
         if (it.type === "coin") {
           sessionCoins++;
           const p = project(it.x, it.z);
@@ -282,13 +258,9 @@
     if (shieldActive) shieldTimer++;
     score = Math.floor(distance * 10) + sessionCoins * 5;
 
-    // Particles
     for (let i = particles.length - 1; i >= 0; i--) {
       const p = particles[i];
-      p.x += p.vx;
-      p.y += p.vy;
-      p.vy += 0.2;
-      p.life--;
+      p.x += p.vx; p.y += p.vy; p.vy += 0.2; p.life--;
       if (p.life <= 0) particles.splice(i, 1);
     }
   }
@@ -308,11 +280,18 @@
     ctx.closePath();
   }
 
-  // --- Draw Sky & Environment ---
-  function drawSky() {
-    const horizonY = H * HORIZON;
+  function shadeColor(color, percent) {
+    const num = parseInt(color.replace("#", ""), 16);
+    const r = Math.min(255, Math.max(0, (num >> 16) + percent));
+    const g = Math.min(255, Math.max(0, ((num >> 8) & 0x00FF) + percent));
+    const b = Math.min(255, Math.max(0, (num & 0x0000FF) + percent));
+    return "#" + (0x1000000 + r * 0x10000 + g * 0x100 + b).toString(16).slice(1);
+  }
 
-    // Sky gradient
+  // --- Draw Sky ---
+  function drawSky() {
+    const horizonY = H * HORIZON_RATIO;
+
     const skyGrad = ctx.createLinearGradient(0, 0, 0, horizonY);
     skyGrad.addColorStop(0, "#0a0a1a");
     skyGrad.addColorStop(0.4, "#141432");
@@ -326,77 +305,50 @@
     const starSeed = [0.1, 0.15, 0.3, 0.42, 0.55, 0.62, 0.74, 0.85, 0.92, 0.05, 0.22, 0.38, 0.67, 0.78, 0.88];
     for (let i = 0; i < starSeed.length; i++) {
       const sx = starSeed[i] * W;
-      const sy = (starSeed[(i + 3) % starSeed.length]) * horizonY * 0.7;
-      const brightness = 0.3 + Math.sin(gameTime * 0.02 + i) * 0.3;
-      ctx.globalAlpha = brightness;
+      const sy = starSeed[(i + 3) % starSeed.length] * horizonY * 0.7;
+      ctx.globalAlpha = 0.3 + Math.sin(gameTime * 0.02 + i) * 0.3;
       ctx.fillRect(sx, sy, 2, 2);
     }
     ctx.globalAlpha = 1;
-
-    // City silhouette on horizon
-    drawCitySilhouette(horizonY);
 
     // Moon
     ctx.fillStyle = "#E8E8F0";
     ctx.beginPath();
     ctx.arc(W * 0.78, horizonY * 0.25, W * 0.04, 0, Math.PI * 2);
     ctx.fill();
-    ctx.fillStyle = "#D0D0E0";
-    ctx.beginPath();
-    ctx.arc(W * 0.775, horizonY * 0.245, W * 0.015, 0, Math.PI * 2);
-    ctx.fill();
+
+    // City silhouette
+    drawCitySilhouette(horizonY);
   }
 
   function drawCitySilhouette(horizonY) {
-    ctx.fillStyle = "#0d0d22";
     const buildings = [
-      { x: 0, w: 0.06, h: 0.08 },
-      { x: 0.05, w: 0.04, h: 0.14 },
-      { x: 0.08, w: 0.06, h: 0.06 },
-      { x: 0.14, w: 0.03, h: 0.18 },
-      { x: 0.17, w: 0.05, h: 0.1 },
-      { x: 0.22, w: 0.04, h: 0.22 },
-      { x: 0.26, w: 0.06, h: 0.12 },
-      { x: 0.32, w: 0.03, h: 0.16 },
-      { x: 0.35, w: 0.07, h: 0.08 },
-      { x: 0.42, w: 0.04, h: 0.25 },
-      { x: 0.46, w: 0.05, h: 0.13 },
-      { x: 0.51, w: 0.06, h: 0.09 },
-      { x: 0.57, w: 0.03, h: 0.2 },
-      { x: 0.60, w: 0.05, h: 0.11 },
-      { x: 0.65, w: 0.04, h: 0.17 },
-      { x: 0.69, w: 0.06, h: 0.07 },
-      { x: 0.75, w: 0.03, h: 0.23 },
-      { x: 0.78, w: 0.05, h: 0.1 },
-      { x: 0.83, w: 0.04, h: 0.15 },
-      { x: 0.87, w: 0.06, h: 0.09 },
-      { x: 0.93, w: 0.04, h: 0.19 },
-      { x: 0.97, w: 0.04, h: 0.11 },
+      [0, 0.06, 0.08], [0.05, 0.04, 0.14], [0.08, 0.06, 0.06],
+      [0.14, 0.03, 0.18], [0.17, 0.05, 0.1], [0.22, 0.04, 0.22],
+      [0.26, 0.06, 0.12], [0.32, 0.03, 0.16], [0.35, 0.07, 0.08],
+      [0.42, 0.04, 0.25], [0.46, 0.05, 0.13], [0.51, 0.06, 0.09],
+      [0.57, 0.03, 0.2], [0.60, 0.05, 0.11], [0.65, 0.04, 0.17],
+      [0.69, 0.06, 0.07], [0.75, 0.03, 0.23], [0.78, 0.05, 0.1],
+      [0.83, 0.04, 0.15], [0.87, 0.06, 0.09], [0.93, 0.04, 0.19],
     ];
-    for (const b of buildings) {
-      const bx = b.x * W;
-      const bw = b.w * W;
-      const bh = b.h * H;
-      ctx.fillRect(bx, horizonY - bh, bw, bh + 2);
-
-      // Small lit windows
+    for (const [bx, bw, bh] of buildings) {
+      const px = bx * W, pw = bw * W, ph = bh * H;
+      ctx.fillStyle = "#0d0d22";
+      ctx.fillRect(px, horizonY - ph, pw, ph + 2);
       ctx.fillStyle = "rgba(255,210,100,0.15)";
-      for (let wy = horizonY - bh + 4; wy < horizonY - 4; wy += 8) {
-        for (let wx = bx + 3; wx < bx + bw - 3; wx += 6) {
-          if (Math.sin(wx * 13.7 + wy * 7.3) > 0.3) {
-            ctx.fillRect(wx, wy, 3, 4);
-          }
+      for (let wy = horizonY - ph + 4; wy < horizonY - 4; wy += 8) {
+        for (let wx = px + 3; wx < px + pw - 3; wx += 6) {
+          if (Math.sin(wx * 13.7 + wy * 7.3) > 0.3) ctx.fillRect(wx, wy, 3, 4);
         }
       }
-      ctx.fillStyle = "#0d0d22";
     }
   }
 
   // --- Draw Road (Pseudo 3D) ---
   function drawRoad() {
-    const horizonY = H * HORIZON;
+    const horizonY = H * HORIZON_RATIO;
 
-    // Ground below horizon
+    // Ground
     const groundGrad = ctx.createLinearGradient(0, horizonY, 0, H);
     groundGrad.addColorStop(0, "#2a3a2a");
     groundGrad.addColorStop(0.1, "#1e2e1e");
@@ -404,7 +356,6 @@
     ctx.fillStyle = groundGrad;
     ctx.fillRect(0, horizonY, W, H - horizonY);
 
-    // Draw road segments from far to near
     const segOffset = (worldZ % SEG_LENGTH) / SEG_LENGTH;
 
     for (let i = TOTAL_SEGS; i >= 1; i--) {
@@ -418,164 +369,143 @@
       const p2R = project(ROAD_HALF_W, z2);
 
       if (p2L.y < horizonY - 2) continue;
+      if (p1L.y > H + 50) continue;
 
-      // Alternating road color for depth feel
       const segIndex = Math.floor(worldZ / SEG_LENGTH) + i;
       const dark = segIndex % 2 === 0;
 
-      // Grass/shoulder
-      const grassW1 = (p1R.x - p1L.x) * 0.15;
-      const grassW2 = (p2R.x - p2L.x) * 0.15;
+      // Grass / shoulder
+      const grassW1 = (p1R.x - p1L.x) * 0.2;
+      const grassW2 = (p2R.x - p2L.x) * 0.2;
 
-      // Left grass
       ctx.fillStyle = dark ? "#1a3a1a" : "#1e4020";
       ctx.beginPath();
-      ctx.moveTo(p1L.x - grassW1, p1L.y);
-      ctx.lineTo(p1L.x, p1L.y);
-      ctx.lineTo(p2L.x, p2L.y);
-      ctx.lineTo(p2L.x - grassW2, p2L.y);
-      ctx.closePath();
-      ctx.fill();
-
-      // Right grass
+      ctx.moveTo(p1L.x - grassW1, p1L.y); ctx.lineTo(p1L.x, p1L.y);
+      ctx.lineTo(p2L.x, p2L.y); ctx.lineTo(p2L.x - grassW2, p2L.y);
+      ctx.closePath(); ctx.fill();
       ctx.beginPath();
-      ctx.moveTo(p1R.x, p1R.y);
-      ctx.lineTo(p1R.x + grassW1, p1R.y);
-      ctx.lineTo(p2R.x + grassW2, p2R.y);
-      ctx.lineTo(p2R.x, p2R.y);
-      ctx.closePath();
-      ctx.fill();
+      ctx.moveTo(p1R.x, p1R.y); ctx.lineTo(p1R.x + grassW1, p1R.y);
+      ctx.lineTo(p2R.x + grassW2, p2R.y); ctx.lineTo(p2R.x, p2R.y);
+      ctx.closePath(); ctx.fill();
 
       // Road surface
       ctx.fillStyle = dark ? "#333345" : "#3a3a52";
       ctx.beginPath();
-      ctx.moveTo(p1L.x, p1L.y);
-      ctx.lineTo(p1R.x, p1R.y);
-      ctx.lineTo(p2R.x, p2R.y);
-      ctx.lineTo(p2L.x, p2L.y);
-      ctx.closePath();
-      ctx.fill();
+      ctx.moveTo(p1L.x, p1L.y); ctx.lineTo(p1R.x, p1R.y);
+      ctx.lineTo(p2R.x, p2R.y); ctx.lineTo(p2L.x, p2L.y);
+      ctx.closePath(); ctx.fill();
 
-      // Road edge lines (white)
+      // Edge lines
+      const edgeW = Math.max(1, (p2R.x - p2L.x) * 0.015);
       ctx.fillStyle = "#CCC";
-      const edgeW1 = Math.max(1, (p2R.x - p2L.x) * 0.012);
-      // Left edge
       ctx.beginPath();
-      ctx.moveTo(p1L.x, p1L.y);
-      ctx.lineTo(p1L.x + edgeW1, p1L.y);
-      ctx.lineTo(p2L.x + edgeW1, p2L.y);
-      ctx.lineTo(p2L.x, p2L.y);
-      ctx.closePath();
-      ctx.fill();
-      // Right edge
+      ctx.moveTo(p1L.x, p1L.y); ctx.lineTo(p1L.x + edgeW, p1L.y);
+      ctx.lineTo(p2L.x + edgeW, p2L.y); ctx.lineTo(p2L.x, p2L.y);
+      ctx.closePath(); ctx.fill();
       ctx.beginPath();
-      ctx.moveTo(p1R.x - edgeW1, p1R.y);
-      ctx.lineTo(p1R.x, p1R.y);
-      ctx.lineTo(p2R.x, p2R.y);
-      ctx.lineTo(p2R.x - edgeW1, p2R.y);
-      ctx.closePath();
-      ctx.fill();
+      ctx.moveTo(p1R.x - edgeW, p1R.y); ctx.lineTo(p1R.x, p1R.y);
+      ctx.lineTo(p2R.x, p2R.y); ctx.lineTo(p2R.x - edgeW, p2R.y);
+      ctx.closePath(); ctx.fill();
 
-      // Lane dashes (only on certain segments)
+      // Lane dashes
       if (segIndex % 2 === 0) {
         ctx.fillStyle = "rgba(255,255,255,0.6)";
         for (let ln = 1; ln < LANE_COUNT; ln++) {
           const frac = ln / LANE_COUNT;
           const lx1 = p1L.x + (p1R.x - p1L.x) * frac;
           const lx2 = p2L.x + (p2R.x - p2L.x) * frac;
-          const dashW = Math.max(1, (p2R.x - p2L.x) * 0.008);
+          const dashW = Math.max(1, (p2R.x - p2L.x) * 0.01);
           ctx.beginPath();
-          ctx.moveTo(lx1 - dashW, p1L.y);
-          ctx.lineTo(lx1 + dashW, p1L.y);
-          ctx.lineTo(lx2 + dashW, p2L.y);
-          ctx.lineTo(lx2 - dashW, p2L.y);
-          ctx.closePath();
-          ctx.fill();
+          ctx.moveTo(lx1 - dashW, p1L.y); ctx.lineTo(lx1 + dashW, p1L.y);
+          ctx.lineTo(lx2 + dashW, p2L.y); ctx.lineTo(lx2 - dashW, p2L.y);
+          ctx.closePath(); ctx.fill();
         }
       }
     }
   }
 
-  // --- Draw 3D Car (back view) ---
+  // ==========================================================
+  // OBJECT RENDERING - All sizes in world units via ppu
+  // ==========================================================
+
+  // --- Car (back view) ---
   function draw3DCar(wx, wz, color) {
     const p = project(wx, wz);
-    if (p.y < H * HORIZON) return;
+    if (p.y < H * HORIZON_RATIO || p.y > H + 100) return;
 
-    const s = Math.min(p.scale * 1.5, 12);
-    const carW = s * 22;
-    const carH = s * 16;
+    const ppu = p.ppu;
+    const carW = ppu * 0.7;
+    const carH = ppu * 0.55;
+    if (carW < 3) return;
+
     const cx = p.x;
     const cy = p.y;
-
-    if (carW < 2) return;
 
     // Shadow
     ctx.fillStyle = "rgba(0,0,0,0.3)";
     ctx.beginPath();
-    ctx.ellipse(cx, cy + carH * 0.05, carW * 0.55, carH * 0.08, 0, 0, Math.PI * 2);
+    ctx.ellipse(cx, cy + 2, carW * 0.55, carH * 0.1, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    // Car body (back view - we see the rear)
     const bodyX = cx - carW / 2;
     const bodyY = cy - carH;
 
     // Main body
     ctx.fillStyle = color;
-    drawRoundRect(bodyX, bodyY + carH * 0.15, carW, carH * 0.65, carW * 0.08);
+    drawRoundRect(bodyX, bodyY + carH * 0.15, carW, carH * 0.7, carW * 0.08);
     ctx.fill();
 
     // Roof
     ctx.fillStyle = shadeColor(color, -20);
-    drawRoundRect(bodyX + carW * 0.1, bodyY, carW * 0.8, carH * 0.35, carW * 0.06);
+    drawRoundRect(bodyX + carW * 0.1, bodyY - carH * 0.05, carW * 0.8, carH * 0.38, carW * 0.06);
     ctx.fill();
 
     // Rear window
     ctx.fillStyle = "rgba(100,180,220,0.5)";
-    drawRoundRect(bodyX + carW * 0.15, bodyY + carH * 0.03, carW * 0.7, carH * 0.25, carW * 0.04);
+    drawRoundRect(bodyX + carW * 0.15, bodyY, carW * 0.7, carH * 0.25, carW * 0.04);
     ctx.fill();
 
     // Rear lights
     ctx.fillStyle = "#FF1744";
     ctx.shadowColor = "#FF1744";
-    ctx.shadowBlur = s * 3;
-    drawRoundRect(bodyX + carW * 0.05, bodyY + carH * 0.55, carW * 0.15, carH * 0.12, 2);
+    ctx.shadowBlur = Math.min(carW * 0.15, 10);
+    drawRoundRect(bodyX + carW * 0.03, bodyY + carH * 0.55, carW * 0.18, carH * 0.13, 2);
     ctx.fill();
-    drawRoundRect(bodyX + carW * 0.8, bodyY + carH * 0.55, carW * 0.15, carH * 0.12, 2);
+    drawRoundRect(bodyX + carW * 0.79, bodyY + carH * 0.55, carW * 0.18, carH * 0.13, 2);
     ctx.fill();
     ctx.shadowBlur = 0;
 
     // License plate
     ctx.fillStyle = "#FFF";
-    drawRoundRect(cx - carW * 0.15, bodyY + carH * 0.7, carW * 0.3, carH * 0.1, 1);
+    drawRoundRect(cx - carW * 0.14, bodyY + carH * 0.72, carW * 0.28, carH * 0.1, 1);
     ctx.fill();
 
-    // Wheels (visible at sides)
+    // Wheels
     ctx.fillStyle = "#111";
-    ctx.fillRect(bodyX - carW * 0.03, cy - carH * 0.2, carW * 0.08, carH * 0.18);
-    ctx.fillRect(bodyX + carW * 0.95, cy - carH * 0.2, carW * 0.08, carH * 0.18);
+    const wheelW = carW * 0.08;
+    const wheelH = carH * 0.22;
+    ctx.fillRect(bodyX - wheelW * 0.5, cy - wheelH, wheelW, wheelH);
+    ctx.fillRect(bodyX + carW - wheelW * 0.5, cy - wheelH, wheelW, wheelH);
   }
 
-  function shadeColor(color, percent) {
-    const num = parseInt(color.replace("#", ""), 16);
-    const r = Math.min(255, Math.max(0, (num >> 16) + percent));
-    const g = Math.min(255, Math.max(0, ((num >> 8) & 0x00FF) + percent));
-    const b = Math.min(255, Math.max(0, (num & 0x0000FF) + percent));
-    return "#" + (0x1000000 + r * 0x10000 + g * 0x100 + b).toString(16).slice(1);
-  }
-
-  // --- Draw 3D Cone ---
+  // --- Cone ---
   function draw3DCone(wx, wz) {
     const p = project(wx, wz);
-    if (p.y < H * HORIZON) return;
-    const s = Math.min(p.scale * 1.5, 12);
-    const coneH = s * 14;
-    const coneW = s * 7;
-    if (coneW < 1) return;
+    if (p.y < H * HORIZON_RATIO || p.y > H + 50) return;
+    const ppu = p.ppu;
+    const coneH = ppu * 0.45;
+    const coneW = ppu * 0.22;
+    if (coneW < 2) return;
 
-    const cx = p.x;
-    const cy = p.y;
+    const cx = p.x, cy = p.y;
 
     // Base
+    ctx.fillStyle = "#E65100";
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, coneW * 0.6, coneH * 0.08, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Body
     ctx.fillStyle = "#FF6D00";
     ctx.beginPath();
     ctx.moveTo(cx, cy - coneH);
@@ -584,42 +514,33 @@
     ctx.closePath();
     ctx.fill();
 
-    // White stripes
+    // White stripe
     ctx.fillStyle = "#FFF";
-    ctx.beginPath();
-    const stripeY = cy - coneH * 0.45;
-    const stripeW = coneW * 0.35;
-    ctx.fillRect(cx - stripeW / 2, stripeY, stripeW, coneH * 0.15);
-
-    // Base plate
-    ctx.fillStyle = "#E65100";
-    ctx.beginPath();
-    ctx.ellipse(cx, cy, coneW * 0.6, coneH * 0.08, 0, 0, Math.PI * 2);
-    ctx.fill();
+    const sw = coneW * 0.32;
+    ctx.fillRect(cx - sw / 2, cy - coneH * 0.5, sw, coneH * 0.15);
   }
 
-  // --- Draw 3D Box ---
+  // --- Box ---
   function draw3DBox(wx, wz) {
     const p = project(wx, wz);
-    if (p.y < H * HORIZON) return;
-    const s = Math.min(p.scale * 1.5, 12);
-    const bw = s * 10;
-    const bh = s * 10;
-    if (bw < 1) return;
+    if (p.y < H * HORIZON_RATIO || p.y > H + 50) return;
+    const ppu = p.ppu;
+    const bw = ppu * 0.35;
+    const bh = ppu * 0.35;
+    if (bw < 2) return;
 
-    const cx = p.x;
-    const cy = p.y;
+    const cx = p.x, cy = p.y;
 
     // Front face
     ctx.fillStyle = "#8D6E63";
     ctx.fillRect(cx - bw / 2, cy - bh, bw, bh);
 
-    // Top face (3D effect)
+    // Top face
     ctx.fillStyle = "#A1887F";
     ctx.beginPath();
     ctx.moveTo(cx - bw / 2, cy - bh);
-    ctx.lineTo(cx - bw * 0.3, cy - bh - bh * 0.2);
-    ctx.lineTo(cx + bw * 0.7, cy - bh - bh * 0.2);
+    ctx.lineTo(cx - bw * 0.3, cy - bh - bh * 0.25);
+    ctx.lineTo(cx + bw * 0.7, cy - bh - bh * 0.25);
     ctx.lineTo(cx + bw / 2, cy - bh);
     ctx.closePath();
     ctx.fill();
@@ -628,99 +549,100 @@
     ctx.fillStyle = "#6D4C41";
     ctx.beginPath();
     ctx.moveTo(cx + bw / 2, cy - bh);
-    ctx.lineTo(cx + bw * 0.7, cy - bh - bh * 0.2);
-    ctx.lineTo(cx + bw * 0.7, cy + bh * 0.2 - bh * 0.2);
+    ctx.lineTo(cx + bw * 0.7, cy - bh - bh * 0.25);
+    ctx.lineTo(cx + bw * 0.7, cy - bh * 0.25);
     ctx.lineTo(cx + bw / 2, cy);
     ctx.closePath();
     ctx.fill();
 
-    // Tape cross
+    // Tape
     ctx.strokeStyle = "#FFCC80";
-    ctx.lineWidth = Math.max(1, s * 0.5);
+    ctx.lineWidth = Math.max(1, bw * 0.04);
     ctx.beginPath();
-    ctx.moveTo(cx - bw / 2, cy - bh);
-    ctx.lineTo(cx + bw / 2, cy);
-    ctx.moveTo(cx + bw / 2, cy - bh);
-    ctx.lineTo(cx - bw / 2, cy);
+    ctx.moveTo(cx - bw / 2, cy - bh); ctx.lineTo(cx + bw / 2, cy);
+    ctx.moveTo(cx + bw / 2, cy - bh); ctx.lineTo(cx - bw / 2, cy);
     ctx.stroke();
   }
 
-  // --- Draw 3D Oil ---
+  // --- Oil ---
   function draw3DOil(wx, wz) {
     const p = project(wx, wz);
-    if (p.y < H * HORIZON) return;
-    const s = Math.min(p.scale * 1.5, 12);
-    const ow = s * 14;
-    const oh = s * 4;
-    if (ow < 1) return;
+    if (p.y < H * HORIZON_RATIO || p.y > H + 50) return;
+    const ppu = p.ppu;
+    const ow = ppu * 0.5;
+    const oh = ppu * 0.12;
+    if (ow < 2) return;
 
     ctx.fillStyle = "rgba(20,20,30,0.65)";
     ctx.beginPath();
-    ctx.ellipse(p.x, p.y - oh * 0.3, ow * 0.5, oh * 0.5, 0, 0, Math.PI * 2);
+    ctx.ellipse(p.x, p.y - oh * 0.3, ow * 0.5, oh, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    // Sheen
     ctx.fillStyle = "rgba(80,80,120,0.25)";
     ctx.beginPath();
-    ctx.ellipse(p.x - ow * 0.1, p.y - oh * 0.5, ow * 0.2, oh * 0.25, 0.3, 0, Math.PI * 2);
+    ctx.ellipse(p.x - ow * 0.1, p.y - oh * 0.5, ow * 0.15, oh * 0.5, 0.3, 0, Math.PI * 2);
     ctx.fill();
   }
 
-  // --- Draw 3D Coin ---
+  // --- Coin ---
   function draw3DCoin(wx, wz, bobPhase) {
     const p = project(wx, wz);
-    if (p.y < H * HORIZON) return;
-    const s = Math.min(p.scale * 1.5, 12);
-    const r = s * 5;
-    if (r < 1) return;
+    if (p.y < H * HORIZON_RATIO || p.y > H + 50) return;
+    const ppu = p.ppu;
+    const r = ppu * 0.12;
+    if (r < 1.5) return;
 
-    const bob = Math.sin(bobPhase) * s * 2;
+    const bob = Math.sin(bobPhase) * r * 0.6;
+    const cy = p.y - r * 1.5 - bob;
 
     ctx.save();
     ctx.shadowColor = "#FFD700";
-    ctx.shadowBlur = s * 4;
+    ctx.shadowBlur = Math.min(r * 2, 12);
     ctx.fillStyle = "#FFD700";
     ctx.beginPath();
-    ctx.arc(p.x, p.y - r - bob, r, 0, Math.PI * 2);
+    ctx.arc(p.x, cy, r, 0, Math.PI * 2);
     ctx.fill();
     ctx.shadowBlur = 0;
 
     ctx.fillStyle = "#FFC107";
     ctx.beginPath();
-    ctx.arc(p.x, p.y - r - bob, r * 0.65, 0, Math.PI * 2);
+    ctx.arc(p.x, cy, r * 0.65, 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.fillStyle = "#FF8F00";
-    ctx.font = `bold ${Math.max(6, Math.floor(r * 1.2))}px Arial`;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText("$", p.x, p.y - r - bob + 1);
+    if (r > 4) {
+      ctx.fillStyle = "#FF8F00";
+      ctx.font = `bold ${Math.max(6, Math.floor(r))}px Arial`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("$", p.x, cy + 1);
+    }
     ctx.restore();
   }
 
-  // --- Draw 3D Shield Item ---
+  // --- Shield Item ---
   function draw3DShield(wx, wz, bobPhase) {
     const p = project(wx, wz);
-    if (p.y < H * HORIZON) return;
-    const s = Math.min(p.scale * 1.5, 12);
-    const sz = s * 6;
-    if (sz < 1) return;
+    if (p.y < H * HORIZON_RATIO || p.y > H + 50) return;
+    const ppu = p.ppu;
+    const sz = ppu * 0.15;
+    if (sz < 2) return;
 
-    const bob = Math.sin(bobPhase) * s * 2;
+    const bob = Math.sin(bobPhase) * sz * 0.5;
+    const cy = p.y - sz * 1.5 - bob;
 
     ctx.save();
     ctx.shadowColor = "#00E5FF";
-    ctx.shadowBlur = s * 5;
+    ctx.shadowBlur = Math.min(sz * 2, 15);
     ctx.strokeStyle = "#00E5FF";
-    ctx.lineWidth = Math.max(1, s * 0.6);
+    ctx.lineWidth = Math.max(1, sz * 0.12);
+
     ctx.beginPath();
-    const sy = p.y - sz - bob;
-    ctx.moveTo(p.x, sy - sz);
-    ctx.lineTo(p.x + sz * 0.8, sy - sz * 0.5);
-    ctx.lineTo(p.x + sz * 0.8, sy + sz * 0.3);
-    ctx.quadraticCurveTo(p.x, sy + sz, p.x, sy + sz);
-    ctx.quadraticCurveTo(p.x, sy + sz, p.x - sz * 0.8, sy + sz * 0.3);
-    ctx.lineTo(p.x - sz * 0.8, sy - sz * 0.5);
+    ctx.moveTo(p.x, cy - sz);
+    ctx.lineTo(p.x + sz * 0.8, cy - sz * 0.5);
+    ctx.lineTo(p.x + sz * 0.8, cy + sz * 0.3);
+    ctx.quadraticCurveTo(p.x, cy + sz, p.x, cy + sz);
+    ctx.quadraticCurveTo(p.x, cy + sz, p.x - sz * 0.8, cy + sz * 0.3);
+    ctx.lineTo(p.x - sz * 0.8, cy - sz * 0.5);
     ctx.closePath();
     ctx.stroke();
     ctx.fillStyle = "rgba(0,229,255,0.2)";
@@ -728,231 +650,199 @@
     ctx.restore();
   }
 
-  // --- Draw Player Bike (Back View, Large, Near Camera) ---
+  // ==========================================================
+  // PLAYER BIKE - Back View (fixed screen-relative size)
+  // ==========================================================
   function drawPlayerBike(skin) {
     const pWorldX = playerX * ROAD_HALF_W * 0.8;
-    const pWorldZ = 8;
-    const p = project(pWorldX, pWorldZ);
+    const p = project(pWorldX, PLAYER_Z);
 
-    const baseScale = W * 0.0045;
     const cx = p.x;
     const cy = p.y + playerBob;
+
+    // Scale based on screen size for consistent appearance
+    const s = W * 0.005;
 
     ctx.save();
     ctx.translate(cx, cy);
 
-    // --- Shadow on ground ---
-    ctx.fillStyle = "rgba(0,0,0,0.3)";
+    // Shadow
+    ctx.fillStyle = "rgba(0,0,0,0.35)";
     ctx.beginPath();
-    ctx.ellipse(0, baseScale * 5, baseScale * 18, baseScale * 4, 0, 0, Math.PI * 2);
+    ctx.ellipse(0, s * 4, s * 16, s * 3.5, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    // Scale everything
-    const s = baseScale;
-
     // === REAR WHEEL ===
-    const wheelR = s * 14;
-    const wheelY = s * 2;
+    const wheelR = s * 12;
+    const wheelY = s * 1;
 
-    ctx.strokeStyle = "#333";
-    ctx.lineWidth = s * 2.5;
+    // Tire
+    ctx.strokeStyle = "#444";
+    ctx.lineWidth = s * 3.5;
     ctx.beginPath();
     ctx.arc(0, wheelY, wheelR, 0, Math.PI * 2);
     ctx.stroke();
 
-    // Tire
-    ctx.strokeStyle = "#555";
-    ctx.lineWidth = s * 4;
+    // Rim
+    ctx.strokeStyle = "#888";
+    ctx.lineWidth = s * 1;
     ctx.beginPath();
-    ctx.arc(0, wheelY, wheelR, 0, Math.PI * 2);
+    ctx.arc(0, wheelY, wheelR - s * 2, 0, Math.PI * 2);
     ctx.stroke();
 
     // Hub
-    ctx.fillStyle = "#888";
+    ctx.fillStyle = "#999";
     ctx.beginPath();
-    ctx.arc(0, wheelY, s * 3, 0, Math.PI * 2);
+    ctx.arc(0, wheelY, s * 2.5, 0, Math.PI * 2);
     ctx.fill();
 
-    // Spokes
-    ctx.strokeStyle = "#999";
-    ctx.lineWidth = s * 0.5;
+    // Spokes (rotating)
+    ctx.strokeStyle = "#AAA";
+    ctx.lineWidth = s * 0.4;
     for (let i = 0; i < 8; i++) {
       const a = pedalAngle + (i * Math.PI) / 4;
       ctx.beginPath();
-      ctx.moveTo(Math.cos(a) * s * 3, wheelY + Math.sin(a) * s * 3);
-      ctx.lineTo(Math.cos(a) * wheelR * 0.85, wheelY + Math.sin(a) * wheelR * 0.85);
+      ctx.moveTo(Math.cos(a) * s * 2.5, wheelY + Math.sin(a) * s * 2.5);
+      ctx.lineTo(Math.cos(a) * (wheelR - s * 2.5), wheelY + Math.sin(a) * (wheelR - s * 2.5));
       ctx.stroke();
     }
 
-    // === FRAME (seen from behind - foreshortened) ===
-    // Seat stays going up from rear axle
+    // === FRAME ===
     ctx.strokeStyle = skin.frame;
-    ctx.lineWidth = s * 2;
+    ctx.lineWidth = s * 1.8;
+    ctx.lineCap = "round";
+
+    // Seat stays (V shape from rear axle up)
     ctx.beginPath();
-    ctx.moveTo(-s * 4, wheelY);
-    ctx.lineTo(-s * 3, -s * 12);
+    ctx.moveTo(-s * 3.5, wheelY); ctx.lineTo(-s * 2.5, -s * 10);
     ctx.stroke();
     ctx.beginPath();
-    ctx.moveTo(s * 4, wheelY);
-    ctx.lineTo(s * 3, -s * 12);
+    ctx.moveTo(s * 3.5, wheelY); ctx.lineTo(s * 2.5, -s * 10);
     ctx.stroke();
 
-    // Seat tube (center, going up)
-    ctx.lineWidth = s * 2.5;
+    // Seat tube
+    ctx.lineWidth = s * 2.2;
     ctx.beginPath();
-    ctx.moveTo(0, wheelY);
-    ctx.lineTo(0, -s * 16);
+    ctx.moveTo(0, wheelY); ctx.lineTo(0, -s * 14);
     ctx.stroke();
 
-    // Top tube going forward (foreshortened)
-    ctx.lineWidth = s * 2;
+    // Top tube (foreshortened forward)
+    ctx.lineWidth = s * 1.8;
     ctx.beginPath();
-    ctx.moveTo(-s * 2.5, -s * 13);
-    ctx.lineTo(0, -s * 18);
-    ctx.lineTo(s * 2.5, -s * 13);
+    ctx.moveTo(-s * 2, -s * 11); ctx.lineTo(0, -s * 16); ctx.lineTo(s * 2, -s * 11);
     ctx.stroke();
-
-    // === SEAT ===
-    ctx.fillStyle = "#2C2C2C";
-    drawRoundRect(-s * 5, -s * 17, s * 10, s * 3.5, s * 1.5);
-    ctx.fill();
-
-    // === HANDLEBARS (seen from behind, curved) ===
-    ctx.strokeStyle = "#AAA";
-    ctx.lineWidth = s * 2;
-    ctx.beginPath();
-    ctx.moveTo(-s * 12, -s * 22);
-    ctx.quadraticCurveTo(-s * 6, -s * 24, 0, -s * 23);
-    ctx.quadraticCurveTo(s * 6, -s * 24, s * 12, -s * 22);
-    ctx.stroke();
-
-    // Handlebar grips
-    ctx.fillStyle = "#333";
-    ctx.beginPath();
-    ctx.arc(-s * 12, -s * 22, s * 1.8, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(s * 12, -s * 22, s * 1.8, 0, Math.PI * 2);
-    ctx.fill();
 
     // Head tube
     ctx.strokeStyle = skin.frame;
-    ctx.lineWidth = s * 2.5;
+    ctx.lineWidth = s * 2.2;
     ctx.beginPath();
-    ctx.moveTo(0, -s * 18);
-    ctx.lineTo(0, -s * 23);
+    ctx.moveTo(0, -s * 16); ctx.lineTo(0, -s * 20);
     ctx.stroke();
 
-    // === RIDER (Back View) ===
-    // LEGS (pedaling animation)
-    const legPhase = pedalAngle;
+    // === SEAT ===
+    ctx.fillStyle = "#2A2A2A";
+    drawRoundRect(-s * 4.5, -s * 15.5, s * 9, s * 3, s * 1.2);
+    ctx.fill();
+
+    // === HANDLEBARS ===
+    ctx.strokeStyle = "#BBB";
+    ctx.lineWidth = s * 1.8;
+    ctx.beginPath();
+    ctx.moveTo(-s * 10, -s * 19.5);
+    ctx.quadraticCurveTo(-s * 5, -s * 21.5, 0, -s * 20.5);
+    ctx.quadraticCurveTo(s * 5, -s * 21.5, s * 10, -s * 19.5);
+    ctx.stroke();
+
+    // Grips
+    ctx.fillStyle = "#333";
+    ctx.beginPath(); ctx.arc(-s * 10, -s * 19.5, s * 1.5, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(s * 10, -s * 19.5, s * 1.5, 0, Math.PI * 2); ctx.fill();
+
+    // === RIDER ===
+    const leg = pedalAngle;
+
+    // Legs
     ctx.strokeStyle = skin.pants;
-    ctx.lineWidth = s * 4;
+    ctx.lineWidth = s * 3.5;
     ctx.lineCap = "round";
 
     // Left leg
-    const lKneeX = -s * 5 + Math.sin(legPhase) * s * 3;
-    const lKneeY = -s * 4 + Math.cos(legPhase) * s * 4;
-    const lFootY = wheelY - s * 2 + Math.cos(legPhase) * s * 3;
-    ctx.beginPath();
-    ctx.moveTo(-s * 3, -s * 14);
-    ctx.lineTo(lKneeX, lKneeY);
-    ctx.lineTo(-s * 3 + Math.sin(legPhase) * s * 2, lFootY);
-    ctx.stroke();
+    const lkx = -s * 4.5 + Math.sin(leg) * s * 2.5;
+    const lky = -s * 3 + Math.cos(leg) * s * 3.5;
+    const lfx = -s * 2.5 + Math.sin(leg) * s * 1.5;
+    const lfy = wheelY - s * 1.5 + Math.cos(leg) * s * 2.5;
+    ctx.beginPath(); ctx.moveTo(-s * 2.5, -s * 12); ctx.lineTo(lkx, lky); ctx.lineTo(lfx, lfy); ctx.stroke();
 
     // Right leg
-    const rKneeX = s * 5 + Math.sin(legPhase + Math.PI) * s * 3;
-    const rKneeY = -s * 4 + Math.cos(legPhase + Math.PI) * s * 4;
-    const rFootY = wheelY - s * 2 + Math.cos(legPhase + Math.PI) * s * 3;
-    ctx.beginPath();
-    ctx.moveTo(s * 3, -s * 14);
-    ctx.lineTo(rKneeX, rKneeY);
-    ctx.lineTo(s * 3 + Math.sin(legPhase + Math.PI) * s * 2, rFootY);
-    ctx.stroke();
+    const rkx = s * 4.5 + Math.sin(leg + Math.PI) * s * 2.5;
+    const rky = -s * 3 + Math.cos(leg + Math.PI) * s * 3.5;
+    const rfx = s * 2.5 + Math.sin(leg + Math.PI) * s * 1.5;
+    const rfy = wheelY - s * 1.5 + Math.cos(leg + Math.PI) * s * 2.5;
+    ctx.beginPath(); ctx.moveTo(s * 2.5, -s * 12); ctx.lineTo(rkx, rky); ctx.lineTo(rfx, rfy); ctx.stroke();
 
     // Shoes
-    ctx.fillStyle = "#222";
-    ctx.beginPath();
-    ctx.arc(-s * 3 + Math.sin(legPhase) * s * 2, lFootY, s * 2, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(s * 3 + Math.sin(legPhase + Math.PI) * s * 2, rFootY, s * 2, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.fillStyle = "#1A1A1A";
+    ctx.beginPath(); ctx.arc(lfx, lfy, s * 1.6, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(rfx, rfy, s * 1.6, 0, Math.PI * 2); ctx.fill();
 
-    // TORSO (back of jersey)
+    // Torso (back of jersey)
     ctx.fillStyle = skin.shirt;
     ctx.beginPath();
-    ctx.moveTo(-s * 8, -s * 14);
-    ctx.quadraticCurveTo(-s * 9, -s * 24, -s * 4, -s * 30);
-    ctx.lineTo(s * 4, -s * 30);
-    ctx.quadraticCurveTo(s * 9, -s * 24, s * 8, -s * 14);
+    ctx.moveTo(-s * 7, -s * 12);
+    ctx.quadraticCurveTo(-s * 8, -s * 22, -s * 3.5, -s * 27);
+    ctx.lineTo(s * 3.5, -s * 27);
+    ctx.quadraticCurveTo(s * 8, -s * 22, s * 7, -s * 12);
     ctx.closePath();
     ctx.fill();
 
-    // Jersey detail line (back)
+    // Jersey back detail
     ctx.strokeStyle = shadeColor(skin.shirt, -30);
-    ctx.lineWidth = s * 0.8;
-    ctx.beginPath();
-    ctx.moveTo(0, -s * 30);
-    ctx.lineTo(0, -s * 14);
-    ctx.stroke();
+    ctx.lineWidth = s * 0.6;
+    ctx.beginPath(); ctx.moveTo(0, -s * 27); ctx.lineTo(0, -s * 12); ctx.stroke();
 
-    // ARMS (reaching to handlebars)
+    // Arms
     ctx.strokeStyle = skin.shirt;
-    ctx.lineWidth = s * 3.5;
+    ctx.lineWidth = s * 3;
     ctx.lineCap = "round";
-    // Left arm
-    ctx.beginPath();
-    ctx.moveTo(-s * 8, -s * 27);
-    ctx.quadraticCurveTo(-s * 12, -s * 24, -s * 11, -s * 22);
-    ctx.stroke();
-    // Right arm
-    ctx.beginPath();
-    ctx.moveTo(s * 8, -s * 27);
-    ctx.quadraticCurveTo(s * 12, -s * 24, s * 11, -s * 22);
-    ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-s * 7, -s * 24); ctx.quadraticCurveTo(-s * 10, -s * 21, -s * 9.5, -s * 19.5); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(s * 7, -s * 24); ctx.quadraticCurveTo(s * 10, -s * 21, s * 9.5, -s * 19.5); ctx.stroke();
 
-    // Hands/gloves
+    // Gloves
     ctx.fillStyle = "#333";
-    ctx.beginPath();
-    ctx.arc(-s * 11.5, -s * 22, s * 1.8, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(s * 11.5, -s * 22, s * 1.8, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.beginPath(); ctx.arc(-s * 9.5, -s * 19.5, s * 1.5, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(s * 9.5, -s * 19.5, s * 1.5, 0, Math.PI * 2); ctx.fill();
 
-    // HEAD
     // Neck
     ctx.fillStyle = "#E8B887";
-    ctx.fillRect(-s * 2, -s * 33, s * 4, s * 4);
+    ctx.fillRect(-s * 1.8, -s * 30, s * 3.6, s * 3.5);
 
-    // Helmet (back view)
+    // Helmet
     ctx.fillStyle = skin.frame;
     ctx.beginPath();
-    ctx.ellipse(0, -s * 36, s * 7, s * 6.5, 0, 0, Math.PI * 2);
+    ctx.ellipse(0, -s * 33, s * 6, s * 5.5, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    // Helmet visor edge
+    // Helmet bottom edge
     ctx.fillStyle = shadeColor(skin.frame, -25);
     ctx.beginPath();
-    ctx.ellipse(0, -s * 33, s * 7.2, s * 2.5, 0, 0, Math.PI);
+    ctx.ellipse(0, -s * 30, s * 6.2, s * 2, 0, 0, Math.PI);
     ctx.fill();
 
     // Helmet stripe
     ctx.fillStyle = "#FFF";
     ctx.globalAlpha = 0.3;
-    ctx.fillRect(-s * 0.8, -s * 42, s * 1.6, s * 10);
+    ctx.fillRect(-s * 0.7, -s * 38, s * 1.4, s * 9);
     ctx.globalAlpha = 1;
 
-    // === SHIELD EFFECT ===
+    // === SHIELD GLOW ===
     if (shieldActive) {
       const pulse = 0.5 + Math.sin(shieldTimer * 0.12) * 0.3;
       ctx.strokeStyle = `rgba(0, 229, 255, ${pulse})`;
-      ctx.lineWidth = s * 1.5;
+      ctx.lineWidth = s * 1.2;
       ctx.shadowColor = "#00E5FF";
-      ctx.shadowBlur = s * 8;
+      ctx.shadowBlur = s * 6;
       ctx.beginPath();
-      ctx.ellipse(0, -s * 15, s * 18, s * 28, 0, 0, Math.PI * 2);
+      ctx.ellipse(0, -s * 14, s * 16, s * 25, 0, 0, Math.PI * 2);
       ctx.stroke();
       ctx.shadowBlur = 0;
     }
@@ -960,32 +850,24 @@
     ctx.restore();
   }
 
-  // --- Draw Mini Bike for menus ---
+  // --- Mini Bike (for menus) ---
   function drawMiniBike(cx, cy, scale, skin) {
     ctx.save();
     ctx.translate(cx, cy);
     const s = scale;
 
-    // Wheel
     ctx.strokeStyle = "#555";
     ctx.lineWidth = s * 3;
-    ctx.beginPath();
-    ctx.arc(0, s * 2, s * 10, 0, Math.PI * 2);
-    ctx.stroke();
+    ctx.beginPath(); ctx.arc(0, s * 2, s * 10, 0, Math.PI * 2); ctx.stroke();
 
-    // Frame
     ctx.strokeStyle = skin.frame;
     ctx.lineWidth = s * 2;
-    ctx.beginPath();
-    ctx.moveTo(0, s * 2);
-    ctx.lineTo(0, -s * 12);
-    ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, s * 2); ctx.lineTo(0, -s * 12); ctx.stroke();
     ctx.beginPath();
     ctx.moveTo(-s * 8, -s * 16);
     ctx.quadraticCurveTo(0, -s * 18, s * 8, -s * 16);
     ctx.stroke();
 
-    // Body
     ctx.fillStyle = skin.shirt;
     ctx.beginPath();
     ctx.moveTo(-s * 5, -s * 10);
@@ -995,19 +877,16 @@
     ctx.closePath();
     ctx.fill();
 
-    // Helmet
     ctx.fillStyle = skin.frame;
-    ctx.beginPath();
-    ctx.arc(0, -s * 28, s * 5, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.beginPath(); ctx.arc(0, -s * 28, s * 5, 0, Math.PI * 2); ctx.fill();
 
     ctx.restore();
   }
 
-  // --- Draw HUD ---
+  // --- HUD ---
   function drawHUD() {
-    ctx.fillStyle = "rgba(0,0,0,0.4)";
-    drawRoundRect(8, 8, W * 0.45, 58, 10);
+    ctx.fillStyle = "rgba(0,0,0,0.45)";
+    drawRoundRect(8, 8, W * 0.48, 60, 10);
     ctx.fill();
 
     ctx.fillStyle = "#FFF";
@@ -1019,9 +898,8 @@
     ctx.font = `${Math.floor(W * 0.035)}px Arial`;
     ctx.fillText("Coins: " + sessionCoins, 18, 56);
 
-    // Speed
-    ctx.fillStyle = "rgba(0,0,0,0.4)";
-    drawRoundRect(W - W * 0.3 - 8, 8, W * 0.3, 35, 10);
+    ctx.fillStyle = "rgba(0,0,0,0.45)";
+    drawRoundRect(W - W * 0.32 - 8, 8, W * 0.32, 36, 10);
     ctx.fill();
     ctx.fillStyle = "rgba(255,255,255,0.8)";
     ctx.font = `bold ${Math.floor(W * 0.033)}px Arial`;
@@ -1029,14 +907,14 @@
     ctx.fillText(Math.floor(playerSpeed * 15) + " km/h", W - 18, 33);
 
     if (shieldActive) {
-      ctx.fillStyle = "rgba(0,229,255,0.6)";
+      ctx.fillStyle = "rgba(0,229,255,0.7)";
       ctx.font = `bold ${Math.floor(W * 0.035)}px Arial`;
       ctx.textAlign = "center";
-      ctx.fillText("SHIELD", W / 2, 30);
+      ctx.fillText("SHIELD ACTIVE", W / 2, 30);
     }
   }
 
-  // --- Draw Particles ---
+  // --- Particles ---
   function drawParticles() {
     for (const p of particles) {
       ctx.globalAlpha = p.life / p.maxLife;
@@ -1046,19 +924,18 @@
     ctx.globalAlpha = 1;
   }
 
-  // --- Screens ---
+  // ==========================================================
+  // SCREENS
+  // ==========================================================
   const menuButtons = {};
 
   function drawMenu() {
-    // Animated background
     drawSky();
     drawRoad();
 
-    // Darken overlay
     ctx.fillStyle = "rgba(0,0,0,0.45)";
     ctx.fillRect(0, 0, W, H);
 
-    // Title
     ctx.save();
     ctx.shadowColor = "#00E5FF";
     ctx.shadowBlur = 25;
@@ -1071,114 +948,83 @@
     ctx.fillText("or CRASH", W / 2, H * 0.27);
     ctx.restore();
 
-    // Subtitle
     ctx.fillStyle = "rgba(255,255,255,0.5)";
     ctx.font = `${Math.floor(W * 0.033)}px Arial`;
     ctx.textAlign = "center";
     ctx.fillText("Hyper Casual Bike Runner", W / 2, H * 0.31);
 
-    // Bike preview
-    const currentSkin = getSkin(data.currentSkin);
-    drawMiniBike(W / 2, H * 0.44, W * 0.0035, currentSkin);
+    drawMiniBike(W / 2, H * 0.44, W * 0.0035, getSkin(data.currentSkin));
 
-    // High score
     ctx.fillStyle = "#FFD54F";
     ctx.font = `bold ${Math.floor(W * 0.04)}px Arial`;
     ctx.textAlign = "center";
     ctx.fillText("BEST: " + data.highScore, W / 2, H * 0.56);
-
     ctx.fillStyle = "#FFD700";
     ctx.font = `${Math.floor(W * 0.035)}px Arial`;
     ctx.fillText("Coins: " + data.coins, W / 2, H * 0.61);
 
-    // Play button
-    const btnW = W * 0.6;
-    const btnH = H * 0.065;
+    const btnW = W * 0.6, btnH = H * 0.065;
     const btnX = W / 2 - btnW / 2;
-    const btnY = H * 0.67;
 
-    ctx.fillStyle = "#00E676";
-    ctx.shadowColor = "#00E676";
-    ctx.shadowBlur = 15;
-    drawRoundRect(btnX, btnY, btnW, btnH, 14);
-    ctx.fill();
-    ctx.shadowBlur = 0;
+    const btnY = H * 0.67;
+    ctx.fillStyle = "#00E676"; ctx.shadowColor = "#00E676"; ctx.shadowBlur = 15;
+    drawRoundRect(btnX, btnY, btnW, btnH, 14); ctx.fill(); ctx.shadowBlur = 0;
     ctx.fillStyle = "#FFF";
     ctx.font = `bold ${Math.floor(W * 0.05)}px Arial`;
     ctx.fillText("PLAY", W / 2, btnY + btnH / 2 + 2);
     menuButtons.play = { x: btnX, y: btnY, w: btnW, h: btnH };
 
-    // Shop
     const sbtnY = H * 0.78;
-    ctx.fillStyle = "#7C4DFF";
-    ctx.shadowColor = "#7C4DFF";
-    ctx.shadowBlur = 10;
-    drawRoundRect(btnX, sbtnY, btnW, btnH, 14);
-    ctx.fill();
-    ctx.shadowBlur = 0;
+    ctx.fillStyle = "#7C4DFF"; ctx.shadowColor = "#7C4DFF"; ctx.shadowBlur = 10;
+    drawRoundRect(btnX, sbtnY, btnW, btnH, 14); ctx.fill(); ctx.shadowBlur = 0;
     ctx.fillStyle = "#FFF";
     ctx.font = `bold ${Math.floor(W * 0.045)}px Arial`;
     ctx.fillText("SHOP", W / 2, sbtnY + btnH / 2 + 2);
     menuButtons.shop = { x: btnX, y: sbtnY, w: btnW, h: btnH };
 
-    // Controls hint
     ctx.fillStyle = "rgba(255,255,255,0.3)";
     ctx.font = `${Math.floor(W * 0.028)}px Arial`;
     ctx.fillText("Drag left/right to steer", W / 2, H * 0.92);
   }
 
   function drawGameOver() {
-    // Keep the 3D scene visible behind
     ctx.fillStyle = "rgba(0,0,0,0.65)";
     ctx.fillRect(0, 0, W, H);
 
-    // Crash text with shake effect
     ctx.save();
-    ctx.shadowColor = "#FF1744";
-    ctx.shadowBlur = 30;
+    ctx.shadowColor = "#FF1744"; ctx.shadowBlur = 30;
     ctx.fillStyle = "#FF5252";
     ctx.font = `bold ${Math.floor(W * 0.1)}px Arial`;
     ctx.textAlign = "center";
     ctx.fillText("CRASH!", W / 2, H * 0.22);
     ctx.restore();
 
-    // Score panel
     ctx.fillStyle = "rgba(0,0,0,0.5)";
-    drawRoundRect(W * 0.1, H * 0.28, W * 0.8, H * 0.22, 16);
-    ctx.fill();
+    drawRoundRect(W * 0.1, H * 0.28, W * 0.8, H * 0.22, 16); ctx.fill();
 
     ctx.fillStyle = "#FFF";
     ctx.font = `bold ${Math.floor(W * 0.055)}px Arial`;
     ctx.fillText("Score: " + score, W / 2, H * 0.35);
-
     ctx.fillStyle = "#FFD54F";
     ctx.font = `${Math.floor(W * 0.04)}px Arial`;
     ctx.fillText("Best: " + data.highScore, W / 2, H * 0.41);
-
     ctx.fillStyle = "#FFD700";
     ctx.fillText("Coins: +" + sessionCoins, W / 2, H * 0.47);
 
-    // Retry
-    const btnW = W * 0.6;
-    const btnH = H * 0.065;
+    const btnW = W * 0.6, btnH = H * 0.065;
     const btnX = W / 2 - btnW / 2;
+
     const btnY = H * 0.56;
-    ctx.fillStyle = "#00E676";
-    ctx.shadowColor = "#00E676";
-    ctx.shadowBlur = 12;
-    drawRoundRect(btnX, btnY, btnW, btnH, 14);
-    ctx.fill();
-    ctx.shadowBlur = 0;
+    ctx.fillStyle = "#00E676"; ctx.shadowColor = "#00E676"; ctx.shadowBlur = 12;
+    drawRoundRect(btnX, btnY, btnW, btnH, 14); ctx.fill(); ctx.shadowBlur = 0;
     ctx.fillStyle = "#FFF";
     ctx.font = `bold ${Math.floor(W * 0.05)}px Arial`;
     ctx.fillText("RETRY", W / 2, btnY + btnH / 2 + 2);
     menuButtons.retry = { x: btnX, y: btnY, w: btnW, h: btnH };
 
-    // Menu
     const mbtnY = H * 0.66;
     ctx.fillStyle = "#546E7A";
-    drawRoundRect(btnX, mbtnY, btnW, btnH, 14);
-    ctx.fill();
+    drawRoundRect(btnX, mbtnY, btnW, btnH, 14); ctx.fill();
     ctx.fillStyle = "#FFF";
     ctx.font = `bold ${Math.floor(W * 0.045)}px Arial`;
     ctx.fillText("MENU", W / 2, mbtnY + btnH / 2 + 2);
@@ -1194,7 +1040,6 @@
     ctx.fillStyle = "#0f0f20";
     ctx.fillRect(0, 0, W, H);
 
-    // Header
     ctx.fillStyle = "rgba(0,0,0,0.5)";
     ctx.fillRect(0, 0, W, 90);
 
@@ -1207,27 +1052,20 @@
     ctx.font = `${Math.floor(W * 0.035)}px Arial`;
     ctx.fillText("Coins: " + data.coins, W / 2, 72);
 
-    // Back
     ctx.fillStyle = "#546E7A";
-    drawRoundRect(12, 14, 70, 32, 8);
-    ctx.fill();
+    drawRoundRect(12, 14, 70, 32, 8); ctx.fill();
     ctx.fillStyle = "#FFF";
     ctx.font = `bold ${Math.floor(W * 0.032)}px Arial`;
     ctx.fillText("BACK", 47, 35);
     menuButtons.shopBack = { x: 12, y: 14, w: 70, h: 32 };
 
-    // Skin cards
-    const cardW = W * 0.85;
-    const cardH = 90;
+    const cardW = W * 0.85, cardH = 90, gap = 10;
     const startY = 105 - shopScroll;
-    const gap = 10;
 
     menuButtons.skinCards = [];
 
     ctx.save();
-    ctx.beginPath();
-    ctx.rect(0, 90, W, H - 90);
-    ctx.clip();
+    ctx.beginPath(); ctx.rect(0, 90, W, H - 90); ctx.clip();
 
     for (let i = 0; i < SKINS.length; i++) {
       const skin = SKINS[i];
@@ -1238,20 +1076,15 @@
       const equipped = data.currentSkin === skin.id;
 
       ctx.fillStyle = equipped ? "#1B5E20" : owned ? "#1a1a35" : "#252545";
-      drawRoundRect((W - cardW) / 2, cy, cardW, cardH, 12);
-      ctx.fill();
+      drawRoundRect((W - cardW) / 2, cy, cardW, cardH, 12); ctx.fill();
 
       if (equipped) {
-        ctx.strokeStyle = "#00E676";
-        ctx.lineWidth = 2;
-        drawRoundRect((W - cardW) / 2, cy, cardW, cardH, 12);
-        ctx.stroke();
+        ctx.strokeStyle = "#00E676"; ctx.lineWidth = 2;
+        drawRoundRect((W - cardW) / 2, cy, cardW, cardH, 12); ctx.stroke();
       }
 
-      // Mini bike
       drawMiniBike((W - cardW) / 2 + 40, cy + cardH / 2 + 5, 1.3, skin);
 
-      // Name
       ctx.fillStyle = "#FFF";
       ctx.font = `bold ${Math.floor(W * 0.042)}px Arial`;
       ctx.textAlign = "left";
@@ -1269,15 +1102,15 @@
         ctx.fillText(skin.price + " coins", (W - cardW) / 2 + 75, cy + 60);
       }
 
-      menuButtons.skinCards.push({
-        x: (W - cardW) / 2, y: cy, w: cardW, h: cardH, skinId: skin.id,
-      });
+      menuButtons.skinCards.push({ x: (W - cardW) / 2, y: cy, w: cardW, h: cardH, skinId: skin.id });
     }
 
     ctx.restore();
   }
 
-  // --- Render ---
+  // ==========================================================
+  // RENDER
+  // ==========================================================
   function render() {
     ctx.clearRect(0, 0, W, H);
 
@@ -1287,11 +1120,11 @@
       drawSky();
       drawRoad();
 
-      // Collect all world objects, sort by z (far first)
+      // Z-sort: far objects first
       const allObjects = [];
       for (const o of worldObstacles) allObjects.push({ ...o, kind: "obstacle" });
       for (const it of worldItems) allObjects.push({ ...it, kind: "item" });
-      allObjects.push({ kind: "player", z: 8 });
+      allObjects.push({ kind: "player", z: PLAYER_Z });
       allObjects.sort((a, b) => b.z - a.z);
 
       for (const obj of allObjects) {
@@ -1310,7 +1143,6 @@
 
       drawParticles();
       drawHUD();
-
       if (state === STATE.GAMEOVER) drawGameOver();
     } else if (state === STATE.SHOP) {
       drawShop();
@@ -1324,7 +1156,9 @@
     requestAnimationFrame(loop);
   }
 
-  // --- Input ---
+  // ==========================================================
+  // INPUT
+  // ==========================================================
   function getPos(e) {
     const rect = canvas.getBoundingClientRect();
     const t = e.touches ? e.touches[0] || e.changedTouches[0] : e;
@@ -1344,37 +1178,28 @@
 
     if (state === STATE.MENU) {
       if (inBtn(pos, menuButtons.play)) {
-        sessionCoins = 0;
-        initGame();
-        state = STATE.PLAYING;
+        sessionCoins = 0; initGame(); state = STATE.PLAYING;
       } else if (inBtn(pos, menuButtons.shop)) {
-        shopScroll = 0;
-        state = STATE.SHOP;
+        shopScroll = 0; state = STATE.SHOP;
       }
     } else if (state === STATE.PLAYING) {
       touchStartX = pos.x;
       isDragging = true;
     } else if (state === STATE.GAMEOVER) {
       if (inBtn(pos, menuButtons.retry)) {
-        sessionCoins = 0;
-        initGame();
-        state = STATE.PLAYING;
+        sessionCoins = 0; initGame(); state = STATE.PLAYING;
       } else if (inBtn(pos, menuButtons.menu)) {
         state = STATE.MENU;
       }
     } else if (state === STATE.SHOP) {
-      if (inBtn(pos, menuButtons.shopBack)) {
-        state = STATE.MENU;
-        return;
-      }
+      if (inBtn(pos, menuButtons.shopBack)) { state = STATE.MENU; return; }
       if (menuButtons.skinCards) {
         for (const card of menuButtons.skinCards) {
           if (inBtn(pos, card)) {
             const skin = SKINS.find(s => s.id === card.skinId);
             if (!skin) break;
             if (data.skins.includes(skin.id)) {
-              data.currentSkin = skin.id;
-              saveData(data);
+              data.currentSkin = skin.id; saveData(data);
             } else if (data.coins >= skin.price) {
               data.coins -= skin.price;
               data.skins.push(skin.id);
@@ -1397,7 +1222,6 @@
 
     if (state === STATE.PLAYING && isDragging) {
       const delta = pos.x - touchStartX;
-      // Map screen drag to road position
       playerTargetX += delta / (W * 0.35);
       playerTargetX = Math.max(-1, Math.min(1, playerTargetX));
       touchStartX = pos.x;
@@ -1427,24 +1251,16 @@
   document.addEventListener("keydown", (e) => {
     keysDown[e.key] = true;
     if (state === STATE.MENU && (e.key === "Enter" || e.key === " ")) {
-      sessionCoins = 0;
-      initGame();
-      state = STATE.PLAYING;
+      sessionCoins = 0; initGame(); state = STATE.PLAYING;
     } else if (state === STATE.GAMEOVER) {
-      if (e.key === "Enter" || e.key === " ") {
-        sessionCoins = 0;
-        initGame();
-        state = STATE.PLAYING;
-      } else if (e.key === "Escape") {
-        state = STATE.MENU;
-      }
+      if (e.key === "Enter" || e.key === " ") { sessionCoins = 0; initGame(); state = STATE.PLAYING; }
+      else if (e.key === "Escape") state = STATE.MENU;
     } else if (state === STATE.SHOP && e.key === "Escape") {
       state = STATE.MENU;
     }
   });
   document.addEventListener("keyup", (e) => { keysDown[e.key] = false; });
 
-  // Continuous keyboard steering
   function keyboardSteering() {
     if (state === STATE.PLAYING) {
       if (keysDown["ArrowLeft"] || keysDown["a"]) {
