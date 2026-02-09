@@ -1,29 +1,24 @@
 // ============================================================
-// Ride or Crash - Hyper Casual Bike Running Game
+// Ride or Crash - Pseudo-3D Third Person Back View
 // ============================================================
 
 (function () {
   "use strict";
 
-  // --- Canvas Setup ---
   const canvas = document.getElementById("gameCanvas");
   const ctx = canvas.getContext("2d");
 
+  // --- Canvas Setup ---
   let W, H;
-  const ASPECT = 16 / 9;
-  const LANE_COUNT = 3;
-  let LANE_WIDTH, ROAD_LEFT, ROAD_RIGHT, ROAD_WIDTH;
-  let lanePositions = [];
-
   function resize() {
     const ww = window.innerWidth;
     const wh = window.innerHeight;
     if (ww / wh < 9 / 16) {
       W = ww;
-      H = ww * ASPECT;
+      H = ww * (16 / 9);
     } else {
       H = wh;
-      W = wh / ASPECT;
+      W = wh / (16 / 9);
     }
     W = Math.floor(W);
     H = Math.floor(H);
@@ -31,31 +26,25 @@
     canvas.height = H;
     canvas.style.width = W + "px";
     canvas.style.height = H + "px";
-
-    ROAD_WIDTH = W * 0.78;
-    ROAD_LEFT = (W - ROAD_WIDTH) / 2;
-    ROAD_RIGHT = ROAD_LEFT + ROAD_WIDTH;
-    LANE_WIDTH = ROAD_WIDTH / LANE_COUNT;
-    lanePositions = [];
-    for (let i = 0; i < LANE_COUNT; i++) {
-      lanePositions.push(ROAD_LEFT + LANE_WIDTH * i + LANE_WIDTH / 2);
-    }
   }
-
   window.addEventListener("resize", resize);
   resize();
 
+  // --- Perspective Constants ---
+  const HORIZON = 0.38;        // horizon line ratio (from top)
+  const CAM_HEIGHT = 1200;     // virtual camera height
+  const ROAD_HALF_W = 1.5;     // half-width of road in world units
+  const DRAW_DIST = 300;       // how far ahead we render segments
+  const SEG_LENGTH = 5;        // world-unit length per segment
+  const TOTAL_SEGS = Math.ceil(DRAW_DIST / SEG_LENGTH);
+  const LANE_COUNT = 3;
+
   // --- Storage ---
   function loadData() {
-    try {
-      return JSON.parse(localStorage.getItem("roc_save")) || {};
-    } catch (e) {
-      return {};
-    }
+    try { return JSON.parse(localStorage.getItem("roc_save")) || {}; }
+    catch (e) { return {}; }
   }
-  function saveData(d) {
-    localStorage.setItem("roc_save", JSON.stringify(d));
-  }
+  function saveData(d) { localStorage.setItem("roc_save", JSON.stringify(d)); }
   function getData() {
     const d = loadData();
     if (!d.coins) d.coins = 0;
@@ -65,21 +54,18 @@
     return d;
   }
 
-  // --- Skin Definitions ---
+  // --- Skins ---
   const SKINS = [
-    { id: "default", name: "Basic", price: 0, frame: "#4FC3F7", wheel: "#333", body: "#29B6F6" },
-    { id: "red_racer", name: "Red Racer", price: 100, frame: "#EF5350", wheel: "#222", body: "#F44336" },
-    { id: "green_eco", name: "Green Eco", price: 150, frame: "#66BB6A", wheel: "#333", body: "#43A047" },
-    { id: "gold_rush", name: "Gold Rush", price: 300, frame: "#FFD54F", wheel: "#444", body: "#FFC107" },
-    { id: "purple_night", name: "Purple Night", price: 250, frame: "#AB47BC", wheel: "#222", body: "#8E24AA" },
-    { id: "neon_pink", name: "Neon Pink", price: 400, frame: "#FF4081", wheel: "#111", body: "#F50057" },
-    { id: "ice_blue", name: "Ice Blue", price: 350, frame: "#80DEEA", wheel: "#2C2C2C", body: "#00BCD4" },
-    { id: "sunset", name: "Sunset", price: 500, frame: "#FF7043", wheel: "#333", body: "#FF5722" },
+    { id: "default", name: "Basic", price: 0, frame: "#4FC3F7", body: "#29B6F6", shirt: "#29B6F6", pants: "#1565C0" },
+    { id: "red_racer", name: "Red Racer", price: 100, frame: "#EF5350", body: "#F44336", shirt: "#F44336", pants: "#B71C1C" },
+    { id: "green_eco", name: "Green Eco", price: 150, frame: "#66BB6A", body: "#43A047", shirt: "#43A047", pants: "#2E7D32" },
+    { id: "gold_rush", name: "Gold Rush", price: 300, frame: "#FFD54F", body: "#FFC107", shirt: "#FFC107", pants: "#F57F17" },
+    { id: "purple_night", name: "Purple Night", price: 250, frame: "#AB47BC", body: "#8E24AA", shirt: "#8E24AA", pants: "#4A148C" },
+    { id: "neon_pink", name: "Neon Pink", price: 400, frame: "#FF4081", body: "#F50057", shirt: "#F50057", pants: "#880E4F" },
+    { id: "ice_blue", name: "Ice Blue", price: 350, frame: "#80DEEA", body: "#00BCD4", shirt: "#00BCD4", pants: "#006064" },
+    { id: "sunset", name: "Sunset", price: 500, frame: "#FF7043", body: "#FF5722", shirt: "#FF5722", pants: "#BF360C" },
   ];
-
-  function getSkin(id) {
-    return SKINS.find(s => s.id === id) || SKINS[0];
-  }
+  function getSkin(id) { return SKINS.find(s => s.id === id) || SKINS[0]; }
 
   // --- Game State ---
   const STATE = { MENU: 0, PLAYING: 1, GAMEOVER: 2, SHOP: 3 };
@@ -87,65 +73,78 @@
   let data = getData();
 
   // Player
-  let player = {};
-  let obstacles = [];
-  let items = [];
-  let particles = [];
-  let roadMarkings = [];
-
-  // Game vars
-  let score, distance, gameSpeed, speedIncrement, spawnTimer, spawnInterval;
+  let playerX = 0;       // -1 to 1 (road position)
+  let playerTargetX = 0;
+  let playerSpeed, gameTime, score, distance;
+  let speedIncrement;
   let shieldActive, shieldTimer;
-  let gameTime;
+  let sessionCoins;
   let pedalAngle = 0;
+  let playerBob = 0;
+
+  // World objects (z = distance ahead of player)
+  let worldObstacles = [];
+  let worldItems = [];
+  let particles = [];
+
+  // Spawn
+  let spawnTimer, spawnInterval;
+  let worldZ = 0; // total distance traveled
 
   // Touch
   let touchStartX = null;
-  let touchCurrentX = null;
   let isDragging = false;
-  let playerTargetX;
 
-  // Road animation
-  let roadOffset = 0;
+  // --- Projection ---
+  // Projects a world point (wx, wz) to screen coordinates
+  // wx: lateral position (-ROAD_HALF_W to +ROAD_HALF_W)
+  // wz: distance ahead of camera
+  function project(wx, wz) {
+    if (wz <= 0) wz = 0.01;
+    const scale = CAM_HEIGHT / wz;
+    const horizonY = H * HORIZON;
+    const sx = W / 2 + wx * scale * (W * 0.28);
+    const sy = horizonY + (1.0 / wz) * CAM_HEIGHT * (H * 0.35);
+    return { x: sx, y: sy, scale: scale };
+  }
+
+  // Road width at a given z
+  function roadScreenWidth(wz) {
+    if (wz <= 0) wz = 0.01;
+    const scale = CAM_HEIGHT / wz;
+    return ROAD_HALF_W * 2 * scale * (W * 0.28);
+  }
 
   // --- Init ---
   function initGame() {
-    const skinData = getSkin(data.currentSkin);
-    player = {
-      x: W / 2,
-      y: H * 0.75,
-      w: LANE_WIDTH * 0.4,
-      h: LANE_WIDTH * 0.7,
-      lane: 1,
-      skin: skinData,
-    };
-    playerTargetX = lanePositions[1];
-    player.x = playerTargetX;
-
-    obstacles = [];
-    items = [];
-    particles = [];
-
+    playerX = 0;
+    playerTargetX = 0;
+    playerSpeed = 3.5;
+    gameTime = 0;
     score = 0;
     distance = 0;
-    gameSpeed = 4;
-    speedIncrement = 0.001;
-    spawnTimer = 0;
-    spawnInterval = 80;
+    speedIncrement = 0.0008;
     shieldActive = false;
     shieldTimer = 0;
-    gameTime = 0;
+    sessionCoins = 0;
     pedalAngle = 0;
+    playerBob = 0;
+    worldZ = 0;
 
-    // Init road markings
-    roadMarkings = [];
-    const markGap = H / 6;
-    for (let i = 0; i < 8; i++) {
-      roadMarkings.push({ y: i * markGap });
-    }
+    worldObstacles = [];
+    worldItems = [];
+    particles = [];
+
+    spawnTimer = 0;
+    spawnInterval = 60;
   }
 
-  // --- Spawn Functions ---
+  // --- Spawn ---
+  function laneToX(lane) {
+    // lane 0,1,2 -> x positions
+    return (lane - 1) * (ROAD_HALF_W * 0.6);
+  }
+
   function spawnObstacle() {
     const lane = Math.floor(Math.random() * LANE_COUNT);
     const types = ["car", "cone", "box", "oil"];
@@ -155,58 +154,43 @@
       cum += weights[i];
       if (r < cum) { type = types[i]; break; }
     }
-
-    const w = type === "car" ? LANE_WIDTH * 0.55 : LANE_WIDTH * 0.35;
-    const h = type === "car" ? LANE_WIDTH * 0.9 : LANE_WIDTH * 0.35;
-    const speed = type === "car" ? gameSpeed * 0.4 : 0;
-
-    obstacles.push({
-      x: lanePositions[lane],
-      y: -h,
-      w, h,
-      type,
-      lane,
-      speed,
+    worldObstacles.push({
+      x: laneToX(lane),
+      z: DRAW_DIST + 20,
+      type: type,
+      lane: lane,
+      carSpeed: type === "car" ? playerSpeed * 0.3 : 0,
+      hitW: type === "car" ? 0.45 : 0.3,
+      hitD: type === "car" ? 0.8 : 0.4,
+      carColor: ["#E53935", "#1E88E5", "#43A047", "#FB8C00", "#8E24AA"][Math.floor(Math.random() * 5)],
     });
   }
 
   function spawnItem() {
     const lane = Math.floor(Math.random() * LANE_COUNT);
     const isShield = Math.random() < 0.12;
-    items.push({
-      x: lanePositions[lane],
-      y: -30,
-      w: 28,
-      h: 28,
-      lane,
+    worldItems.push({
+      x: laneToX(lane),
+      z: DRAW_DIST + 20,
       type: isShield ? "shield" : "coin",
+      lane: lane,
       bobPhase: Math.random() * Math.PI * 2,
     });
   }
 
   // --- Particles ---
-  function addParticles(x, y, color, count) {
+  function addParticles(sx, sy, color, count) {
     for (let i = 0; i < count; i++) {
       particles.push({
-        x, y,
-        vx: (Math.random() - 0.5) * 6,
-        vy: (Math.random() - 0.5) * 6 - 2,
-        life: 30 + Math.random() * 20,
-        maxLife: 50,
-        color,
-        size: 2 + Math.random() * 4,
+        x: sx, y: sy,
+        vx: (Math.random() - 0.5) * 8,
+        vy: (Math.random() - 0.5) * 8 - 3,
+        life: 25 + Math.random() * 20,
+        maxLife: 45,
+        color: color,
+        size: 2 + Math.random() * 5,
       });
     }
-  }
-
-  // --- Collision ---
-  function boxCollide(a, b) {
-    return (
-      a.x - a.w / 2 < b.x + b.w / 2 &&
-      a.x + a.w / 2 > b.x - b.w / 2 &&
-      a.y - a.h / 2 < b.y + b.h / 2 &&
-      a.y + a.h / 2 > b.y - b.h / 2
-    );
   }
 
   // --- Update ---
@@ -214,96 +198,102 @@
     if (state !== STATE.PLAYING) return;
 
     gameTime++;
-    distance += gameSpeed * 0.1;
-    score = Math.floor(distance) + data._sessionCoins * 5;
-    gameSpeed += speedIncrement;
-    pedalAngle += gameSpeed * 0.05;
+    const dz = playerSpeed * 0.15;
+    worldZ += dz;
+    distance += dz;
+    playerSpeed += speedIncrement;
+    pedalAngle += playerSpeed * 0.07;
+    playerBob = Math.sin(gameTime * 0.15) * 1.5;
 
-    // Road markings
-    for (let m of roadMarkings) {
-      m.y += gameSpeed * 1.2;
-      if (m.y > H + 40) m.y -= (H / 6) * 8;
-    }
+    // Player lateral movement
+    const dx = playerTargetX - playerX;
+    playerX += dx * 0.12;
+    playerX = Math.max(-1, Math.min(1, playerX));
 
     // Spawn
     spawnTimer++;
-    const adjustedInterval = Math.max(30, spawnInterval - gameTime * 0.01);
-    if (spawnTimer >= adjustedInterval) {
+    const adjInterval = Math.max(25, spawnInterval - gameTime * 0.008);
+    if (spawnTimer >= adjInterval) {
       spawnTimer = 0;
       spawnObstacle();
       if (Math.random() < 0.5) spawnItem();
     }
 
-    // Player movement (smooth)
-    const dx = playerTargetX - player.x;
-    player.x += dx * 0.15;
+    // World position of player (in road coords)
+    const pWorldX = playerX * ROAD_HALF_W * 0.8;
+    const pWorldZ = 8; // player is at z=8 from camera
 
-    // Clamp within road
-    player.x = Math.max(ROAD_LEFT + player.w / 2 + 5, Math.min(ROAD_RIGHT - player.w / 2 - 5, player.x));
-
-    // Obstacles
-    for (let i = obstacles.length - 1; i >= 0; i--) {
-      const o = obstacles[i];
-      o.y += gameSpeed - o.speed;
-      if (o.y > H + 100) {
-        obstacles.splice(i, 1);
+    // Update obstacles
+    for (let i = worldObstacles.length - 1; i >= 0; i--) {
+      const o = worldObstacles[i];
+      o.z -= dz - (o.carSpeed * 0.15);
+      if (o.z < -5) {
+        worldObstacles.splice(i, 1);
         continue;
       }
-      if (boxCollide(player, o)) {
+
+      // Collision check (simple box in world space)
+      const dzDiff = Math.abs(o.z - pWorldZ);
+      const dxDiff = Math.abs(o.x - pWorldX);
+      if (dzDiff < o.hitD && dxDiff < o.hitW * 0.7) {
         if (shieldActive) {
           shieldActive = false;
-          addParticles(o.x, o.y, "#00E5FF", 15);
-          obstacles.splice(i, 1);
+          const p = project(o.x, o.z);
+          addParticles(p.x, p.y, "#00E5FF", 15);
+          worldObstacles.splice(i, 1);
         } else {
-          // Game over
-          addParticles(player.x, player.y, "#FF5252", 30);
+          const p = project(pWorldX, pWorldZ);
+          addParticles(p.x, p.y, "#FF5252", 30);
           state = STATE.GAMEOVER;
-          // Save
-          data._sessionCoins = data._sessionCoins || 0;
-          data.coins += data._sessionCoins;
+          score = Math.floor(distance * 10) + sessionCoins * 5;
+          data.coins += sessionCoins;
           if (score > data.highScore) data.highScore = score;
           saveData(data);
         }
       }
     }
 
-    // Items
-    for (let i = items.length - 1; i >= 0; i--) {
-      const it = items[i];
-      it.y += gameSpeed;
-      it.bobPhase += 0.08;
-      if (it.y > H + 50) {
-        items.splice(i, 1);
+    // Update items
+    for (let i = worldItems.length - 1; i >= 0; i--) {
+      const it = worldItems[i];
+      it.z -= dz;
+      it.bobPhase += 0.06;
+      if (it.z < -5) {
+        worldItems.splice(i, 1);
         continue;
       }
-      if (boxCollide(player, it)) {
+      const dzDiff = Math.abs(it.z - pWorldZ);
+      const dxDiff = Math.abs(it.x - pWorldX);
+      if (dzDiff < 1.2 && dxDiff < 0.4) {
         if (it.type === "coin") {
-          data._sessionCoins = (data._sessionCoins || 0) + 1;
-          addParticles(it.x, it.y, "#FFD700", 8);
-        } else if (it.type === "shield") {
+          sessionCoins++;
+          const p = project(it.x, it.z);
+          addParticles(p.x, p.y, "#FFD700", 8);
+        } else {
           shieldActive = true;
           shieldTimer = 0;
-          addParticles(it.x, it.y, "#00E5FF", 12);
+          const p = project(it.x, it.z);
+          addParticles(p.x, p.y, "#00E5FF", 12);
         }
-        items.splice(i, 1);
+        worldItems.splice(i, 1);
       }
     }
 
-    // Shield timer (visual pulse)
     if (shieldActive) shieldTimer++;
+    score = Math.floor(distance * 10) + sessionCoins * 5;
 
     // Particles
     for (let i = particles.length - 1; i >= 0; i--) {
       const p = particles[i];
       p.x += p.vx;
       p.y += p.vy;
-      p.vy += 0.15;
+      p.vy += 0.2;
       p.life--;
       if (p.life <= 0) particles.splice(i, 1);
     }
   }
 
-  // --- Drawing helpers ---
+  // --- Drawing Helpers ---
   function drawRoundRect(x, y, w, h, r) {
     ctx.beginPath();
     ctx.moveTo(x + r, y);
@@ -318,521 +308,926 @@
     ctx.closePath();
   }
 
-  // --- Draw ---
-  function drawBackground() {
+  // --- Draw Sky & Environment ---
+  function drawSky() {
+    const horizonY = H * HORIZON;
+
     // Sky gradient
-    const grad = ctx.createLinearGradient(0, 0, 0, H);
-    grad.addColorStop(0, "#1a1a2e");
-    grad.addColorStop(0.4, "#16213e");
-    grad.addColorStop(1, "#0f3460");
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, W, H);
+    const skyGrad = ctx.createLinearGradient(0, 0, 0, horizonY);
+    skyGrad.addColorStop(0, "#0a0a1a");
+    skyGrad.addColorStop(0.4, "#141432");
+    skyGrad.addColorStop(0.8, "#1a2555");
+    skyGrad.addColorStop(1, "#2a3a6e");
+    ctx.fillStyle = skyGrad;
+    ctx.fillRect(0, 0, W, horizonY + 5);
 
-    // Sidewalk
-    ctx.fillStyle = "#2C2C3E";
-    ctx.fillRect(ROAD_LEFT - 15, 0, 15, H);
-    ctx.fillRect(ROAD_RIGHT, 0, 15, H);
-
-    // Road
-    ctx.fillStyle = "#3A3A50";
-    ctx.fillRect(ROAD_LEFT, 0, ROAD_WIDTH, H);
-
-    // Road edge lines
-    ctx.strokeStyle = "#FFF";
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.moveTo(ROAD_LEFT + 3, 0);
-    ctx.lineTo(ROAD_LEFT + 3, H);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(ROAD_RIGHT - 3, 0);
-    ctx.lineTo(ROAD_RIGHT - 3, H);
-    ctx.stroke();
-
-    // Lane dividers (dashed)
-    ctx.strokeStyle = "rgba(255,255,255,0.4)";
-    ctx.lineWidth = 2;
-    for (let i = 1; i < LANE_COUNT; i++) {
-      const lx = ROAD_LEFT + LANE_WIDTH * i;
-      for (let m of roadMarkings) {
-        const my = m.y;
-        ctx.beginPath();
-        ctx.moveTo(lx, my);
-        ctx.lineTo(lx, my + 30);
-        ctx.stroke();
-      }
+    // Stars
+    ctx.fillStyle = "#FFF";
+    const starSeed = [0.1, 0.15, 0.3, 0.42, 0.55, 0.62, 0.74, 0.85, 0.92, 0.05, 0.22, 0.38, 0.67, 0.78, 0.88];
+    for (let i = 0; i < starSeed.length; i++) {
+      const sx = starSeed[i] * W;
+      const sy = (starSeed[(i + 3) % starSeed.length]) * horizonY * 0.7;
+      const brightness = 0.3 + Math.sin(gameTime * 0.02 + i) * 0.3;
+      ctx.globalAlpha = brightness;
+      ctx.fillRect(sx, sy, 2, 2);
     }
+    ctx.globalAlpha = 1;
 
-    // Scenery buildings (left/right)
-    drawBuildings();
+    // City silhouette on horizon
+    drawCitySilhouette(horizonY);
+
+    // Moon
+    ctx.fillStyle = "#E8E8F0";
+    ctx.beginPath();
+    ctx.arc(W * 0.78, horizonY * 0.25, W * 0.04, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#D0D0E0";
+    ctx.beginPath();
+    ctx.arc(W * 0.775, horizonY * 0.245, W * 0.015, 0, Math.PI * 2);
+    ctx.fill();
   }
 
-  function drawBuildings() {
-    const bw = ROAD_LEFT - 20;
-    if (bw < 10) return;
-    ctx.fillStyle = "#12122a";
-    // left buildings
-    for (let i = 0; i < 5; i++) {
-      const bh = 60 + (i * 37) % 80;
-      const by = i * (H / 5);
-      ctx.fillRect(5, by, bw, bh);
-      // windows
-      ctx.fillStyle = "#FFD54F33";
-      for (let wy = by + 8; wy < by + bh - 8; wy += 16) {
-        for (let wx = 10; wx < bw - 5; wx += 14) {
-          ctx.fillRect(wx, wy, 6, 8);
+  function drawCitySilhouette(horizonY) {
+    ctx.fillStyle = "#0d0d22";
+    const buildings = [
+      { x: 0, w: 0.06, h: 0.08 },
+      { x: 0.05, w: 0.04, h: 0.14 },
+      { x: 0.08, w: 0.06, h: 0.06 },
+      { x: 0.14, w: 0.03, h: 0.18 },
+      { x: 0.17, w: 0.05, h: 0.1 },
+      { x: 0.22, w: 0.04, h: 0.22 },
+      { x: 0.26, w: 0.06, h: 0.12 },
+      { x: 0.32, w: 0.03, h: 0.16 },
+      { x: 0.35, w: 0.07, h: 0.08 },
+      { x: 0.42, w: 0.04, h: 0.25 },
+      { x: 0.46, w: 0.05, h: 0.13 },
+      { x: 0.51, w: 0.06, h: 0.09 },
+      { x: 0.57, w: 0.03, h: 0.2 },
+      { x: 0.60, w: 0.05, h: 0.11 },
+      { x: 0.65, w: 0.04, h: 0.17 },
+      { x: 0.69, w: 0.06, h: 0.07 },
+      { x: 0.75, w: 0.03, h: 0.23 },
+      { x: 0.78, w: 0.05, h: 0.1 },
+      { x: 0.83, w: 0.04, h: 0.15 },
+      { x: 0.87, w: 0.06, h: 0.09 },
+      { x: 0.93, w: 0.04, h: 0.19 },
+      { x: 0.97, w: 0.04, h: 0.11 },
+    ];
+    for (const b of buildings) {
+      const bx = b.x * W;
+      const bw = b.w * W;
+      const bh = b.h * H;
+      ctx.fillRect(bx, horizonY - bh, bw, bh + 2);
+
+      // Small lit windows
+      ctx.fillStyle = "rgba(255,210,100,0.15)";
+      for (let wy = horizonY - bh + 4; wy < horizonY - 4; wy += 8) {
+        for (let wx = bx + 3; wx < bx + bw - 3; wx += 6) {
+          if (Math.sin(wx * 13.7 + wy * 7.3) > 0.3) {
+            ctx.fillRect(wx, wy, 3, 4);
+          }
         }
       }
-      ctx.fillStyle = "#12122a";
+      ctx.fillStyle = "#0d0d22";
     }
-    // right buildings
-    const rx = ROAD_RIGHT + 20;
-    for (let i = 0; i < 5; i++) {
-      const bh = 50 + (i * 47) % 90;
-      const by = i * (H / 5) + 20;
-      ctx.fillRect(rx, by, bw, bh);
-      ctx.fillStyle = "#FFD54F33";
-      for (let wy = by + 8; wy < by + bh - 8; wy += 16) {
-        for (let wx = rx + 5; wx < rx + bw - 5; wx += 14) {
-          ctx.fillRect(wx, wy, 6, 8);
+  }
+
+  // --- Draw Road (Pseudo 3D) ---
+  function drawRoad() {
+    const horizonY = H * HORIZON;
+
+    // Ground below horizon
+    const groundGrad = ctx.createLinearGradient(0, horizonY, 0, H);
+    groundGrad.addColorStop(0, "#2a3a2a");
+    groundGrad.addColorStop(0.1, "#1e2e1e");
+    groundGrad.addColorStop(1, "#0f1a0f");
+    ctx.fillStyle = groundGrad;
+    ctx.fillRect(0, horizonY, W, H - horizonY);
+
+    // Draw road segments from far to near
+    const segOffset = (worldZ % SEG_LENGTH) / SEG_LENGTH;
+
+    for (let i = TOTAL_SEGS; i >= 1; i--) {
+      const z1 = (i - segOffset) * SEG_LENGTH;
+      const z2 = (i - 1 - segOffset) * SEG_LENGTH;
+      if (z2 <= 0.5) continue;
+
+      const p1L = project(-ROAD_HALF_W, z1);
+      const p1R = project(ROAD_HALF_W, z1);
+      const p2L = project(-ROAD_HALF_W, z2);
+      const p2R = project(ROAD_HALF_W, z2);
+
+      if (p2L.y < horizonY - 2) continue;
+
+      // Alternating road color for depth feel
+      const segIndex = Math.floor(worldZ / SEG_LENGTH) + i;
+      const dark = segIndex % 2 === 0;
+
+      // Grass/shoulder
+      const grassW1 = (p1R.x - p1L.x) * 0.15;
+      const grassW2 = (p2R.x - p2L.x) * 0.15;
+
+      // Left grass
+      ctx.fillStyle = dark ? "#1a3a1a" : "#1e4020";
+      ctx.beginPath();
+      ctx.moveTo(p1L.x - grassW1, p1L.y);
+      ctx.lineTo(p1L.x, p1L.y);
+      ctx.lineTo(p2L.x, p2L.y);
+      ctx.lineTo(p2L.x - grassW2, p2L.y);
+      ctx.closePath();
+      ctx.fill();
+
+      // Right grass
+      ctx.beginPath();
+      ctx.moveTo(p1R.x, p1R.y);
+      ctx.lineTo(p1R.x + grassW1, p1R.y);
+      ctx.lineTo(p2R.x + grassW2, p2R.y);
+      ctx.lineTo(p2R.x, p2R.y);
+      ctx.closePath();
+      ctx.fill();
+
+      // Road surface
+      ctx.fillStyle = dark ? "#333345" : "#3a3a52";
+      ctx.beginPath();
+      ctx.moveTo(p1L.x, p1L.y);
+      ctx.lineTo(p1R.x, p1R.y);
+      ctx.lineTo(p2R.x, p2R.y);
+      ctx.lineTo(p2L.x, p2L.y);
+      ctx.closePath();
+      ctx.fill();
+
+      // Road edge lines (white)
+      ctx.fillStyle = "#CCC";
+      const edgeW1 = Math.max(1, (p2R.x - p2L.x) * 0.012);
+      // Left edge
+      ctx.beginPath();
+      ctx.moveTo(p1L.x, p1L.y);
+      ctx.lineTo(p1L.x + edgeW1, p1L.y);
+      ctx.lineTo(p2L.x + edgeW1, p2L.y);
+      ctx.lineTo(p2L.x, p2L.y);
+      ctx.closePath();
+      ctx.fill();
+      // Right edge
+      ctx.beginPath();
+      ctx.moveTo(p1R.x - edgeW1, p1R.y);
+      ctx.lineTo(p1R.x, p1R.y);
+      ctx.lineTo(p2R.x, p2R.y);
+      ctx.lineTo(p2R.x - edgeW1, p2R.y);
+      ctx.closePath();
+      ctx.fill();
+
+      // Lane dashes (only on certain segments)
+      if (segIndex % 2 === 0) {
+        ctx.fillStyle = "rgba(255,255,255,0.6)";
+        for (let ln = 1; ln < LANE_COUNT; ln++) {
+          const frac = ln / LANE_COUNT;
+          const lx1 = p1L.x + (p1R.x - p1L.x) * frac;
+          const lx2 = p2L.x + (p2R.x - p2L.x) * frac;
+          const dashW = Math.max(1, (p2R.x - p2L.x) * 0.008);
+          ctx.beginPath();
+          ctx.moveTo(lx1 - dashW, p1L.y);
+          ctx.lineTo(lx1 + dashW, p1L.y);
+          ctx.lineTo(lx2 + dashW, p2L.y);
+          ctx.lineTo(lx2 - dashW, p2L.y);
+          ctx.closePath();
+          ctx.fill();
         }
       }
-      ctx.fillStyle = "#12122a";
     }
   }
 
-  function drawBike(x, y, w, h, skin) {
-    const cx = x;
-    const cy = y;
-    const scale = w / 40;
+  // --- Draw 3D Car (back view) ---
+  function draw3DCar(wx, wz, color) {
+    const p = project(wx, wz);
+    if (p.y < H * HORIZON) return;
 
-    ctx.save();
-    ctx.translate(cx, cy);
-    ctx.scale(scale, scale);
+    const s = Math.min(p.scale * 1.5, 12);
+    const carW = s * 22;
+    const carH = s * 16;
+    const cx = p.x;
+    const cy = p.y;
 
-    // Wheels
-    const wheelR = 12;
-    const wheelY_back = 22;
-    const wheelY_front = -22;
+    if (carW < 2) return;
 
-    ctx.strokeStyle = skin.wheel;
-    ctx.lineWidth = 3;
+    // Shadow
+    ctx.fillStyle = "rgba(0,0,0,0.3)";
     ctx.beginPath();
-    ctx.arc(0, wheelY_back, wheelR, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.arc(0, wheelY_front, wheelR, 0, Math.PI * 2);
-    ctx.stroke();
-
-    // Wheel spokes
-    ctx.lineWidth = 1;
-    ctx.strokeStyle = "#666";
-    for (let i = 0; i < 4; i++) {
-      const a = pedalAngle + (i * Math.PI) / 2;
-      // back wheel
-      ctx.beginPath();
-      ctx.moveTo(Math.cos(a) * wheelR, wheelY_back + Math.sin(a) * wheelR);
-      ctx.lineTo(-Math.cos(a) * wheelR, wheelY_back - Math.sin(a) * wheelR);
-      ctx.stroke();
-      // front wheel
-      ctx.beginPath();
-      ctx.moveTo(Math.cos(a) * wheelR, wheelY_front + Math.sin(a) * wheelR);
-      ctx.lineTo(-Math.cos(a) * wheelR, wheelY_front - Math.sin(a) * wheelR);
-      ctx.stroke();
-    }
-
-    // Tire fills
-    ctx.fillStyle = "#555";
-    ctx.beginPath();
-    ctx.arc(0, wheelY_back, wheelR - 2, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(0, wheelY_front, wheelR - 2, 0, Math.PI * 2);
+    ctx.ellipse(cx, cy + carH * 0.05, carW * 0.55, carH * 0.08, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    // Frame
-    ctx.strokeStyle = skin.frame;
-    ctx.lineWidth = 3.5;
-    // Main triangle
-    ctx.beginPath();
-    ctx.moveTo(0, wheelY_back); // bottom
-    ctx.lineTo(-4, 0); // seat
-    ctx.lineTo(0, wheelY_front); // front
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(-4, 0);
-    ctx.lineTo(4, 5);
-    ctx.lineTo(0, wheelY_back);
-    ctx.stroke();
+    // Car body (back view - we see the rear)
+    const bodyX = cx - carW / 2;
+    const bodyY = cy - carH;
 
-    // Handlebars
-    ctx.strokeStyle = "#888";
-    ctx.lineWidth = 2.5;
-    ctx.beginPath();
-    ctx.moveTo(-8, wheelY_front - 4);
-    ctx.lineTo(8, wheelY_front - 4);
-    ctx.stroke();
-
-    // Seat
-    ctx.fillStyle = "#333";
-    drawRoundRect(-6, -3, 12, 5, 2);
-    ctx.fill();
-
-    // Rider body (simple)
-    ctx.fillStyle = skin.body;
-    // Torso
-    drawRoundRect(-5, -18, 10, 16, 3);
-    ctx.fill();
-    // Head
-    ctx.fillStyle = "#FFD4A6";
-    ctx.beginPath();
-    ctx.arc(0, -23, 6, 0, Math.PI * 2);
-    ctx.fill();
-    // Helmet
-    ctx.fillStyle = skin.frame;
-    ctx.beginPath();
-    ctx.arc(0, -25, 6, Math.PI, Math.PI * 2);
-    ctx.fill();
-
-    // Pedaling legs
-    const legAngle = pedalAngle;
-    ctx.strokeStyle = "#2C2C2C";
-    ctx.lineWidth = 2.5;
-    // Left leg
-    ctx.beginPath();
-    ctx.moveTo(-2, -2);
-    ctx.lineTo(-2 + Math.cos(legAngle) * 8, 8 + Math.sin(legAngle) * 6);
-    ctx.lineTo(Math.cos(legAngle) * 5, wheelY_back - 4 + Math.sin(legAngle) * 3);
-    ctx.stroke();
-    // Right leg
-    ctx.beginPath();
-    ctx.moveTo(2, -2);
-    ctx.lineTo(2 + Math.cos(legAngle + Math.PI) * 8, 8 + Math.sin(legAngle + Math.PI) * 6);
-    ctx.lineTo(Math.cos(legAngle + Math.PI) * 5, wheelY_back - 4 + Math.sin(legAngle + Math.PI) * 3);
-    ctx.stroke();
-
-    ctx.restore();
-
-    // Shield effect
-    if (shieldActive) {
-      ctx.save();
-      const pulse = 0.8 + Math.sin(shieldTimer * 0.15) * 0.2;
-      ctx.strokeStyle = `rgba(0, 229, 255, ${pulse})`;
-      ctx.lineWidth = 2;
-      ctx.shadowColor = "#00E5FF";
-      ctx.shadowBlur = 15;
-      ctx.beginPath();
-      ctx.ellipse(x, y, w * 0.8, h * 0.65, 0, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.restore();
-    }
-  }
-
-  function drawCar(o) {
-    const x = o.x - o.w / 2;
-    const y = o.y - o.h / 2;
-    const colors = ["#E53935", "#1E88E5", "#43A047", "#8E24AA", "#FB8C00"];
-    const color = colors[Math.abs(Math.floor(o.x * 7 + o.y * 3)) % colors.length];
-
+    // Main body
     ctx.fillStyle = color;
-    drawRoundRect(x, y, o.w, o.h, 6);
+    drawRoundRect(bodyX, bodyY + carH * 0.15, carW, carH * 0.65, carW * 0.08);
     ctx.fill();
 
-    // Windshield
-    ctx.fillStyle = "rgba(150,220,255,0.6)";
-    drawRoundRect(x + o.w * 0.15, y + o.h * 0.12, o.w * 0.7, o.h * 0.2, 3);
+    // Roof
+    ctx.fillStyle = shadeColor(color, -20);
+    drawRoundRect(bodyX + carW * 0.1, bodyY, carW * 0.8, carH * 0.35, carW * 0.06);
     ctx.fill();
 
     // Rear window
-    ctx.fillStyle = "rgba(150,220,255,0.4)";
-    drawRoundRect(x + o.w * 0.15, y + o.h * 0.68, o.w * 0.7, o.h * 0.15, 3);
+    ctx.fillStyle = "rgba(100,180,220,0.5)";
+    drawRoundRect(bodyX + carW * 0.15, bodyY + carH * 0.03, carW * 0.7, carH * 0.25, carW * 0.04);
     ctx.fill();
 
-    // Headlights
-    ctx.fillStyle = "#FFF9C4";
-    ctx.beginPath();
-    ctx.arc(x + 5, y + 4, 3, 0, Math.PI * 2);
-    ctx.arc(x + o.w - 5, y + 4, 3, 0, Math.PI * 2);
+    // Rear lights
+    ctx.fillStyle = "#FF1744";
+    ctx.shadowColor = "#FF1744";
+    ctx.shadowBlur = s * 3;
+    drawRoundRect(bodyX + carW * 0.05, bodyY + carH * 0.55, carW * 0.15, carH * 0.12, 2);
     ctx.fill();
+    drawRoundRect(bodyX + carW * 0.8, bodyY + carH * 0.55, carW * 0.15, carH * 0.12, 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    // License plate
+    ctx.fillStyle = "#FFF";
+    drawRoundRect(cx - carW * 0.15, bodyY + carH * 0.7, carW * 0.3, carH * 0.1, 1);
+    ctx.fill();
+
+    // Wheels (visible at sides)
+    ctx.fillStyle = "#111";
+    ctx.fillRect(bodyX - carW * 0.03, cy - carH * 0.2, carW * 0.08, carH * 0.18);
+    ctx.fillRect(bodyX + carW * 0.95, cy - carH * 0.2, carW * 0.08, carH * 0.18);
   }
 
-  function drawCone(o) {
-    const cx = o.x;
-    const cy = o.y;
-    const s = o.w * 0.4;
+  function shadeColor(color, percent) {
+    const num = parseInt(color.replace("#", ""), 16);
+    const r = Math.min(255, Math.max(0, (num >> 16) + percent));
+    const g = Math.min(255, Math.max(0, ((num >> 8) & 0x00FF) + percent));
+    const b = Math.min(255, Math.max(0, (num & 0x0000FF) + percent));
+    return "#" + (0x1000000 + r * 0x10000 + g * 0x100 + b).toString(16).slice(1);
+  }
+
+  // --- Draw 3D Cone ---
+  function draw3DCone(wx, wz) {
+    const p = project(wx, wz);
+    if (p.y < H * HORIZON) return;
+    const s = Math.min(p.scale * 1.5, 12);
+    const coneH = s * 14;
+    const coneW = s * 7;
+    if (coneW < 1) return;
+
+    const cx = p.x;
+    const cy = p.y;
+
     // Base
     ctx.fillStyle = "#FF6D00";
     ctx.beginPath();
-    ctx.moveTo(cx - s, cy + s);
-    ctx.lineTo(cx + s, cy + s);
-    ctx.lineTo(cx, cy - s * 1.2);
+    ctx.moveTo(cx, cy - coneH);
+    ctx.lineTo(cx - coneW / 2, cy);
+    ctx.lineTo(cx + coneW / 2, cy);
     ctx.closePath();
     ctx.fill();
-    // Stripes
+
+    // White stripes
     ctx.fillStyle = "#FFF";
-    ctx.fillRect(cx - s * 0.35, cy - s * 0.1, s * 0.7, s * 0.3);
+    ctx.beginPath();
+    const stripeY = cy - coneH * 0.45;
+    const stripeW = coneW * 0.35;
+    ctx.fillRect(cx - stripeW / 2, stripeY, stripeW, coneH * 0.15);
+
+    // Base plate
+    ctx.fillStyle = "#E65100";
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, coneW * 0.6, coneH * 0.08, 0, 0, Math.PI * 2);
+    ctx.fill();
   }
 
-  function drawBox(o) {
-    const x = o.x - o.w / 2;
-    const y = o.y - o.h / 2;
+  // --- Draw 3D Box ---
+  function draw3DBox(wx, wz) {
+    const p = project(wx, wz);
+    if (p.y < H * HORIZON) return;
+    const s = Math.min(p.scale * 1.5, 12);
+    const bw = s * 10;
+    const bh = s * 10;
+    if (bw < 1) return;
+
+    const cx = p.x;
+    const cy = p.y;
+
+    // Front face
     ctx.fillStyle = "#8D6E63";
-    ctx.fillRect(x, y, o.w, o.h);
-    ctx.strokeStyle = "#5D4037";
-    ctx.lineWidth = 2;
-    ctx.strokeRect(x, y, o.w, o.h);
-    // Cross tape
-    ctx.strokeStyle = "#FFCC80";
-    ctx.lineWidth = 1.5;
+    ctx.fillRect(cx - bw / 2, cy - bh, bw, bh);
+
+    // Top face (3D effect)
+    ctx.fillStyle = "#A1887F";
     ctx.beginPath();
-    ctx.moveTo(x, y);
-    ctx.lineTo(x + o.w, y + o.h);
-    ctx.moveTo(x + o.w, y);
-    ctx.lineTo(x, y + o.h);
+    ctx.moveTo(cx - bw / 2, cy - bh);
+    ctx.lineTo(cx - bw * 0.3, cy - bh - bh * 0.2);
+    ctx.lineTo(cx + bw * 0.7, cy - bh - bh * 0.2);
+    ctx.lineTo(cx + bw / 2, cy - bh);
+    ctx.closePath();
+    ctx.fill();
+
+    // Right face
+    ctx.fillStyle = "#6D4C41";
+    ctx.beginPath();
+    ctx.moveTo(cx + bw / 2, cy - bh);
+    ctx.lineTo(cx + bw * 0.7, cy - bh - bh * 0.2);
+    ctx.lineTo(cx + bw * 0.7, cy + bh * 0.2 - bh * 0.2);
+    ctx.lineTo(cx + bw / 2, cy);
+    ctx.closePath();
+    ctx.fill();
+
+    // Tape cross
+    ctx.strokeStyle = "#FFCC80";
+    ctx.lineWidth = Math.max(1, s * 0.5);
+    ctx.beginPath();
+    ctx.moveTo(cx - bw / 2, cy - bh);
+    ctx.lineTo(cx + bw / 2, cy);
+    ctx.moveTo(cx + bw / 2, cy - bh);
+    ctx.lineTo(cx - bw / 2, cy);
     ctx.stroke();
   }
 
-  function drawOil(o) {
-    ctx.fillStyle = "rgba(30,30,30,0.7)";
+  // --- Draw 3D Oil ---
+  function draw3DOil(wx, wz) {
+    const p = project(wx, wz);
+    if (p.y < H * HORIZON) return;
+    const s = Math.min(p.scale * 1.5, 12);
+    const ow = s * 14;
+    const oh = s * 4;
+    if (ow < 1) return;
+
+    ctx.fillStyle = "rgba(20,20,30,0.65)";
     ctx.beginPath();
-    ctx.ellipse(o.x, o.y, o.w * 0.6, o.h * 0.4, 0, 0, Math.PI * 2);
+    ctx.ellipse(p.x, p.y - oh * 0.3, ow * 0.5, oh * 0.5, 0, 0, Math.PI * 2);
     ctx.fill();
-    ctx.fillStyle = "rgba(60,60,80,0.3)";
+
+    // Sheen
+    ctx.fillStyle = "rgba(80,80,120,0.25)";
     ctx.beginPath();
-    ctx.ellipse(o.x - 3, o.y - 2, o.w * 0.25, o.h * 0.2, 0.3, 0, Math.PI * 2);
+    ctx.ellipse(p.x - ow * 0.1, p.y - oh * 0.5, ow * 0.2, oh * 0.25, 0.3, 0, Math.PI * 2);
     ctx.fill();
   }
 
-  function drawCoin(it) {
-    const bob = Math.sin(it.bobPhase) * 3;
+  // --- Draw 3D Coin ---
+  function draw3DCoin(wx, wz, bobPhase) {
+    const p = project(wx, wz);
+    if (p.y < H * HORIZON) return;
+    const s = Math.min(p.scale * 1.5, 12);
+    const r = s * 5;
+    if (r < 1) return;
+
+    const bob = Math.sin(bobPhase) * s * 2;
+
     ctx.save();
-    ctx.translate(it.x, it.y + bob);
-    // Glow
     ctx.shadowColor = "#FFD700";
-    ctx.shadowBlur = 10;
+    ctx.shadowBlur = s * 4;
     ctx.fillStyle = "#FFD700";
     ctx.beginPath();
-    ctx.arc(0, 0, 11, 0, Math.PI * 2);
+    ctx.arc(p.x, p.y - r - bob, r, 0, Math.PI * 2);
     ctx.fill();
     ctx.shadowBlur = 0;
-    // Inner
+
     ctx.fillStyle = "#FFC107";
     ctx.beginPath();
-    ctx.arc(0, 0, 7, 0, Math.PI * 2);
+    ctx.arc(p.x, p.y - r - bob, r * 0.65, 0, Math.PI * 2);
     ctx.fill();
-    // Dollar sign
+
     ctx.fillStyle = "#FF8F00";
-    ctx.font = "bold 10px Arial";
+    ctx.font = `bold ${Math.max(6, Math.floor(r * 1.2))}px Arial`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText("$", 0, 1);
+    ctx.fillText("$", p.x, p.y - r - bob + 1);
     ctx.restore();
   }
 
-  function drawShieldItem(it) {
-    const bob = Math.sin(it.bobPhase) * 3;
+  // --- Draw 3D Shield Item ---
+  function draw3DShield(wx, wz, bobPhase) {
+    const p = project(wx, wz);
+    if (p.y < H * HORIZON) return;
+    const s = Math.min(p.scale * 1.5, 12);
+    const sz = s * 6;
+    if (sz < 1) return;
+
+    const bob = Math.sin(bobPhase) * s * 2;
+
     ctx.save();
-    ctx.translate(it.x, it.y + bob);
     ctx.shadowColor = "#00E5FF";
-    ctx.shadowBlur = 12;
+    ctx.shadowBlur = s * 5;
     ctx.strokeStyle = "#00E5FF";
-    ctx.lineWidth = 2.5;
-    // Shield shape
+    ctx.lineWidth = Math.max(1, s * 0.6);
     ctx.beginPath();
-    ctx.moveTo(0, -12);
-    ctx.lineTo(10, -6);
-    ctx.lineTo(10, 4);
-    ctx.quadraticCurveTo(0, 14, 0, 14);
-    ctx.quadraticCurveTo(0, 14, -10, 4);
-    ctx.lineTo(-10, -6);
+    const sy = p.y - sz - bob;
+    ctx.moveTo(p.x, sy - sz);
+    ctx.lineTo(p.x + sz * 0.8, sy - sz * 0.5);
+    ctx.lineTo(p.x + sz * 0.8, sy + sz * 0.3);
+    ctx.quadraticCurveTo(p.x, sy + sz, p.x, sy + sz);
+    ctx.quadraticCurveTo(p.x, sy + sz, p.x - sz * 0.8, sy + sz * 0.3);
+    ctx.lineTo(p.x - sz * 0.8, sy - sz * 0.5);
     ctx.closePath();
     ctx.stroke();
-    ctx.fillStyle = "rgba(0,229,255,0.25)";
+    ctx.fillStyle = "rgba(0,229,255,0.2)";
     ctx.fill();
     ctx.restore();
   }
 
+  // --- Draw Player Bike (Back View, Large, Near Camera) ---
+  function drawPlayerBike(skin) {
+    const pWorldX = playerX * ROAD_HALF_W * 0.8;
+    const pWorldZ = 8;
+    const p = project(pWorldX, pWorldZ);
+
+    const baseScale = W * 0.0045;
+    const cx = p.x;
+    const cy = p.y + playerBob;
+
+    ctx.save();
+    ctx.translate(cx, cy);
+
+    // --- Shadow on ground ---
+    ctx.fillStyle = "rgba(0,0,0,0.3)";
+    ctx.beginPath();
+    ctx.ellipse(0, baseScale * 5, baseScale * 18, baseScale * 4, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Scale everything
+    const s = baseScale;
+
+    // === REAR WHEEL ===
+    const wheelR = s * 14;
+    const wheelY = s * 2;
+
+    ctx.strokeStyle = "#333";
+    ctx.lineWidth = s * 2.5;
+    ctx.beginPath();
+    ctx.arc(0, wheelY, wheelR, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Tire
+    ctx.strokeStyle = "#555";
+    ctx.lineWidth = s * 4;
+    ctx.beginPath();
+    ctx.arc(0, wheelY, wheelR, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Hub
+    ctx.fillStyle = "#888";
+    ctx.beginPath();
+    ctx.arc(0, wheelY, s * 3, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Spokes
+    ctx.strokeStyle = "#999";
+    ctx.lineWidth = s * 0.5;
+    for (let i = 0; i < 8; i++) {
+      const a = pedalAngle + (i * Math.PI) / 4;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a) * s * 3, wheelY + Math.sin(a) * s * 3);
+      ctx.lineTo(Math.cos(a) * wheelR * 0.85, wheelY + Math.sin(a) * wheelR * 0.85);
+      ctx.stroke();
+    }
+
+    // === FRAME (seen from behind - foreshortened) ===
+    // Seat stays going up from rear axle
+    ctx.strokeStyle = skin.frame;
+    ctx.lineWidth = s * 2;
+    ctx.beginPath();
+    ctx.moveTo(-s * 4, wheelY);
+    ctx.lineTo(-s * 3, -s * 12);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(s * 4, wheelY);
+    ctx.lineTo(s * 3, -s * 12);
+    ctx.stroke();
+
+    // Seat tube (center, going up)
+    ctx.lineWidth = s * 2.5;
+    ctx.beginPath();
+    ctx.moveTo(0, wheelY);
+    ctx.lineTo(0, -s * 16);
+    ctx.stroke();
+
+    // Top tube going forward (foreshortened)
+    ctx.lineWidth = s * 2;
+    ctx.beginPath();
+    ctx.moveTo(-s * 2.5, -s * 13);
+    ctx.lineTo(0, -s * 18);
+    ctx.lineTo(s * 2.5, -s * 13);
+    ctx.stroke();
+
+    // === SEAT ===
+    ctx.fillStyle = "#2C2C2C";
+    drawRoundRect(-s * 5, -s * 17, s * 10, s * 3.5, s * 1.5);
+    ctx.fill();
+
+    // === HANDLEBARS (seen from behind, curved) ===
+    ctx.strokeStyle = "#AAA";
+    ctx.lineWidth = s * 2;
+    ctx.beginPath();
+    ctx.moveTo(-s * 12, -s * 22);
+    ctx.quadraticCurveTo(-s * 6, -s * 24, 0, -s * 23);
+    ctx.quadraticCurveTo(s * 6, -s * 24, s * 12, -s * 22);
+    ctx.stroke();
+
+    // Handlebar grips
+    ctx.fillStyle = "#333";
+    ctx.beginPath();
+    ctx.arc(-s * 12, -s * 22, s * 1.8, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(s * 12, -s * 22, s * 1.8, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Head tube
+    ctx.strokeStyle = skin.frame;
+    ctx.lineWidth = s * 2.5;
+    ctx.beginPath();
+    ctx.moveTo(0, -s * 18);
+    ctx.lineTo(0, -s * 23);
+    ctx.stroke();
+
+    // === RIDER (Back View) ===
+    // LEGS (pedaling animation)
+    const legPhase = pedalAngle;
+    ctx.strokeStyle = skin.pants;
+    ctx.lineWidth = s * 4;
+    ctx.lineCap = "round";
+
+    // Left leg
+    const lKneeX = -s * 5 + Math.sin(legPhase) * s * 3;
+    const lKneeY = -s * 4 + Math.cos(legPhase) * s * 4;
+    const lFootY = wheelY - s * 2 + Math.cos(legPhase) * s * 3;
+    ctx.beginPath();
+    ctx.moveTo(-s * 3, -s * 14);
+    ctx.lineTo(lKneeX, lKneeY);
+    ctx.lineTo(-s * 3 + Math.sin(legPhase) * s * 2, lFootY);
+    ctx.stroke();
+
+    // Right leg
+    const rKneeX = s * 5 + Math.sin(legPhase + Math.PI) * s * 3;
+    const rKneeY = -s * 4 + Math.cos(legPhase + Math.PI) * s * 4;
+    const rFootY = wheelY - s * 2 + Math.cos(legPhase + Math.PI) * s * 3;
+    ctx.beginPath();
+    ctx.moveTo(s * 3, -s * 14);
+    ctx.lineTo(rKneeX, rKneeY);
+    ctx.lineTo(s * 3 + Math.sin(legPhase + Math.PI) * s * 2, rFootY);
+    ctx.stroke();
+
+    // Shoes
+    ctx.fillStyle = "#222";
+    ctx.beginPath();
+    ctx.arc(-s * 3 + Math.sin(legPhase) * s * 2, lFootY, s * 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(s * 3 + Math.sin(legPhase + Math.PI) * s * 2, rFootY, s * 2, 0, Math.PI * 2);
+    ctx.fill();
+
+    // TORSO (back of jersey)
+    ctx.fillStyle = skin.shirt;
+    ctx.beginPath();
+    ctx.moveTo(-s * 8, -s * 14);
+    ctx.quadraticCurveTo(-s * 9, -s * 24, -s * 4, -s * 30);
+    ctx.lineTo(s * 4, -s * 30);
+    ctx.quadraticCurveTo(s * 9, -s * 24, s * 8, -s * 14);
+    ctx.closePath();
+    ctx.fill();
+
+    // Jersey detail line (back)
+    ctx.strokeStyle = shadeColor(skin.shirt, -30);
+    ctx.lineWidth = s * 0.8;
+    ctx.beginPath();
+    ctx.moveTo(0, -s * 30);
+    ctx.lineTo(0, -s * 14);
+    ctx.stroke();
+
+    // ARMS (reaching to handlebars)
+    ctx.strokeStyle = skin.shirt;
+    ctx.lineWidth = s * 3.5;
+    ctx.lineCap = "round";
+    // Left arm
+    ctx.beginPath();
+    ctx.moveTo(-s * 8, -s * 27);
+    ctx.quadraticCurveTo(-s * 12, -s * 24, -s * 11, -s * 22);
+    ctx.stroke();
+    // Right arm
+    ctx.beginPath();
+    ctx.moveTo(s * 8, -s * 27);
+    ctx.quadraticCurveTo(s * 12, -s * 24, s * 11, -s * 22);
+    ctx.stroke();
+
+    // Hands/gloves
+    ctx.fillStyle = "#333";
+    ctx.beginPath();
+    ctx.arc(-s * 11.5, -s * 22, s * 1.8, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(s * 11.5, -s * 22, s * 1.8, 0, Math.PI * 2);
+    ctx.fill();
+
+    // HEAD
+    // Neck
+    ctx.fillStyle = "#E8B887";
+    ctx.fillRect(-s * 2, -s * 33, s * 4, s * 4);
+
+    // Helmet (back view)
+    ctx.fillStyle = skin.frame;
+    ctx.beginPath();
+    ctx.ellipse(0, -s * 36, s * 7, s * 6.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Helmet visor edge
+    ctx.fillStyle = shadeColor(skin.frame, -25);
+    ctx.beginPath();
+    ctx.ellipse(0, -s * 33, s * 7.2, s * 2.5, 0, 0, Math.PI);
+    ctx.fill();
+
+    // Helmet stripe
+    ctx.fillStyle = "#FFF";
+    ctx.globalAlpha = 0.3;
+    ctx.fillRect(-s * 0.8, -s * 42, s * 1.6, s * 10);
+    ctx.globalAlpha = 1;
+
+    // === SHIELD EFFECT ===
+    if (shieldActive) {
+      const pulse = 0.5 + Math.sin(shieldTimer * 0.12) * 0.3;
+      ctx.strokeStyle = `rgba(0, 229, 255, ${pulse})`;
+      ctx.lineWidth = s * 1.5;
+      ctx.shadowColor = "#00E5FF";
+      ctx.shadowBlur = s * 8;
+      ctx.beginPath();
+      ctx.ellipse(0, -s * 15, s * 18, s * 28, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+    }
+
+    ctx.restore();
+  }
+
+  // --- Draw Mini Bike for menus ---
+  function drawMiniBike(cx, cy, scale, skin) {
+    ctx.save();
+    ctx.translate(cx, cy);
+    const s = scale;
+
+    // Wheel
+    ctx.strokeStyle = "#555";
+    ctx.lineWidth = s * 3;
+    ctx.beginPath();
+    ctx.arc(0, s * 2, s * 10, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Frame
+    ctx.strokeStyle = skin.frame;
+    ctx.lineWidth = s * 2;
+    ctx.beginPath();
+    ctx.moveTo(0, s * 2);
+    ctx.lineTo(0, -s * 12);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(-s * 8, -s * 16);
+    ctx.quadraticCurveTo(0, -s * 18, s * 8, -s * 16);
+    ctx.stroke();
+
+    // Body
+    ctx.fillStyle = skin.shirt;
+    ctx.beginPath();
+    ctx.moveTo(-s * 5, -s * 10);
+    ctx.quadraticCurveTo(-s * 6, -s * 20, -s * 3, -s * 24);
+    ctx.lineTo(s * 3, -s * 24);
+    ctx.quadraticCurveTo(s * 6, -s * 20, s * 5, -s * 10);
+    ctx.closePath();
+    ctx.fill();
+
+    // Helmet
+    ctx.fillStyle = skin.frame;
+    ctx.beginPath();
+    ctx.arc(0, -s * 28, s * 5, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  // --- Draw HUD ---
+  function drawHUD() {
+    ctx.fillStyle = "rgba(0,0,0,0.4)";
+    drawRoundRect(8, 8, W * 0.45, 58, 10);
+    ctx.fill();
+
+    ctx.fillStyle = "#FFF";
+    ctx.font = `bold ${Math.floor(W * 0.045)}px 'Segoe UI', Arial`;
+    ctx.textAlign = "left";
+    ctx.fillText("Score: " + score, 18, 34);
+
+    ctx.fillStyle = "#FFD700";
+    ctx.font = `${Math.floor(W * 0.035)}px Arial`;
+    ctx.fillText("Coins: " + sessionCoins, 18, 56);
+
+    // Speed
+    ctx.fillStyle = "rgba(0,0,0,0.4)";
+    drawRoundRect(W - W * 0.3 - 8, 8, W * 0.3, 35, 10);
+    ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,0.8)";
+    ctx.font = `bold ${Math.floor(W * 0.033)}px Arial`;
+    ctx.textAlign = "right";
+    ctx.fillText(Math.floor(playerSpeed * 15) + " km/h", W - 18, 33);
+
+    if (shieldActive) {
+      ctx.fillStyle = "rgba(0,229,255,0.6)";
+      ctx.font = `bold ${Math.floor(W * 0.035)}px Arial`;
+      ctx.textAlign = "center";
+      ctx.fillText("SHIELD", W / 2, 30);
+    }
+  }
+
+  // --- Draw Particles ---
   function drawParticles() {
     for (const p of particles) {
-      const alpha = p.life / p.maxLife;
-      ctx.globalAlpha = alpha;
+      ctx.globalAlpha = p.life / p.maxLife;
       ctx.fillStyle = p.color;
       ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
     }
     ctx.globalAlpha = 1;
   }
 
-  function drawHUD() {
-    // Score
-    ctx.fillStyle = "#FFF";
-    ctx.font = `bold ${Math.floor(W * 0.045)}px 'Segoe UI', Arial`;
-    ctx.textAlign = "left";
-    ctx.fillText("Score: " + score, 15, 35);
-
-    // Coins
-    ctx.fillStyle = "#FFD700";
-    ctx.fillText("Coins: " + (data._sessionCoins || 0), 15, 65);
-
-    // Speed indicator
-    ctx.fillStyle = "rgba(255,255,255,0.5)";
-    ctx.font = `${Math.floor(W * 0.03)}px Arial`;
-    ctx.textAlign = "right";
-    ctx.fillText(Math.floor(gameSpeed * 10) + " km/h", W - 15, 35);
-
-    // Shield indicator
-    if (shieldActive) {
-      ctx.fillStyle = "#00E5FF";
-      ctx.font = `bold ${Math.floor(W * 0.035)}px Arial`;
-      ctx.textAlign = "center";
-      ctx.fillText("SHIELD ACTIVE", W / 2, 35);
-    }
-  }
-
   // --- Screens ---
+  const menuButtons = {};
+
   function drawMenu() {
-    // Background
-    const grad = ctx.createLinearGradient(0, 0, 0, H);
-    grad.addColorStop(0, "#0f0c29");
-    grad.addColorStop(0.5, "#302b63");
-    grad.addColorStop(1, "#24243e");
-    ctx.fillStyle = grad;
+    // Animated background
+    drawSky();
+    drawRoad();
+
+    // Darken overlay
+    ctx.fillStyle = "rgba(0,0,0,0.45)";
     ctx.fillRect(0, 0, W, H);
 
     // Title
     ctx.save();
     ctx.shadowColor = "#00E5FF";
-    ctx.shadowBlur = 20;
+    ctx.shadowBlur = 25;
     ctx.fillStyle = "#FFF";
-    ctx.font = `bold ${Math.floor(W * 0.1)}px 'Segoe UI', Arial`;
+    ctx.font = `bold ${Math.floor(W * 0.11)}px 'Segoe UI', Arial`;
     ctx.textAlign = "center";
-    ctx.fillText("RIDE", W / 2, H * 0.22);
+    ctx.fillText("RIDE", W / 2, H * 0.18);
     ctx.fillStyle = "#FF5252";
-    ctx.fillText("or CRASH", W / 2, H * 0.32);
+    ctx.shadowColor = "#FF5252";
+    ctx.fillText("or CRASH", W / 2, H * 0.27);
     ctx.restore();
 
-    // Bike icon
-    const menuSkin = getSkin(data.currentSkin);
-    drawBike(W / 2, H * 0.46, LANE_WIDTH * 0.5, LANE_WIDTH * 0.8, menuSkin);
+    // Subtitle
+    ctx.fillStyle = "rgba(255,255,255,0.5)";
+    ctx.font = `${Math.floor(W * 0.033)}px Arial`;
+    ctx.textAlign = "center";
+    ctx.fillText("Hyper Casual Bike Runner", W / 2, H * 0.31);
+
+    // Bike preview
+    const currentSkin = getSkin(data.currentSkin);
+    drawMiniBike(W / 2, H * 0.44, W * 0.0035, currentSkin);
 
     // High score
     ctx.fillStyle = "#FFD54F";
     ctx.font = `bold ${Math.floor(W * 0.04)}px Arial`;
     ctx.textAlign = "center";
-    ctx.fillText("Best: " + data.highScore, W / 2, H * 0.58);
+    ctx.fillText("BEST: " + data.highScore, W / 2, H * 0.56);
 
-    // Coins
     ctx.fillStyle = "#FFD700";
-    ctx.fillText("Coins: " + data.coins, W / 2, H * 0.63);
+    ctx.font = `${Math.floor(W * 0.035)}px Arial`;
+    ctx.fillText("Coins: " + data.coins, W / 2, H * 0.61);
 
     // Play button
-    const btnW = W * 0.55;
-    const btnH = H * 0.07;
+    const btnW = W * 0.6;
+    const btnH = H * 0.065;
     const btnX = W / 2 - btnW / 2;
-    const btnY = H * 0.7;
+    const btnY = H * 0.67;
+
     ctx.fillStyle = "#00E676";
-    drawRoundRect(btnX, btnY, btnW, btnH, 12);
+    ctx.shadowColor = "#00E676";
+    ctx.shadowBlur = 15;
+    drawRoundRect(btnX, btnY, btnW, btnH, 14);
     ctx.fill();
+    ctx.shadowBlur = 0;
     ctx.fillStyle = "#FFF";
     ctx.font = `bold ${Math.floor(W * 0.05)}px Arial`;
-    ctx.fillText("TAP TO PLAY", W / 2, btnY + btnH / 2 + 2);
+    ctx.fillText("PLAY", W / 2, btnY + btnH / 2 + 2);
+    menuButtons.play = { x: btnX, y: btnY, w: btnW, h: btnH };
 
-    // Shop button
-    const sbtnY = H * 0.82;
+    // Shop
+    const sbtnY = H * 0.78;
     ctx.fillStyle = "#7C4DFF";
-    drawRoundRect(btnX, sbtnY, btnW, btnH, 12);
+    ctx.shadowColor = "#7C4DFF";
+    ctx.shadowBlur = 10;
+    drawRoundRect(btnX, sbtnY, btnW, btnH, 14);
     ctx.fill();
+    ctx.shadowBlur = 0;
     ctx.fillStyle = "#FFF";
     ctx.font = `bold ${Math.floor(W * 0.045)}px Arial`;
     ctx.fillText("SHOP", W / 2, sbtnY + btnH / 2 + 2);
-
-    // Store button positions for click detection
-    menuButtons.play = { x: btnX, y: btnY, w: btnW, h: btnH };
     menuButtons.shop = { x: btnX, y: sbtnY, w: btnW, h: btnH };
+
+    // Controls hint
+    ctx.fillStyle = "rgba(255,255,255,0.3)";
+    ctx.font = `${Math.floor(W * 0.028)}px Arial`;
+    ctx.fillText("Drag left/right to steer", W / 2, H * 0.92);
   }
 
-  const menuButtons = {};
-
   function drawGameOver() {
-    // Dim overlay
-    ctx.fillStyle = "rgba(0,0,0,0.7)";
+    // Keep the 3D scene visible behind
+    ctx.fillStyle = "rgba(0,0,0,0.65)";
     ctx.fillRect(0, 0, W, H);
 
+    // Crash text with shake effect
+    ctx.save();
+    ctx.shadowColor = "#FF1744";
+    ctx.shadowBlur = 30;
     ctx.fillStyle = "#FF5252";
-    ctx.font = `bold ${Math.floor(W * 0.09)}px Arial`;
+    ctx.font = `bold ${Math.floor(W * 0.1)}px Arial`;
     ctx.textAlign = "center";
-    ctx.fillText("CRASH!", W / 2, H * 0.25);
+    ctx.fillText("CRASH!", W / 2, H * 0.22);
+    ctx.restore();
+
+    // Score panel
+    ctx.fillStyle = "rgba(0,0,0,0.5)";
+    drawRoundRect(W * 0.1, H * 0.28, W * 0.8, H * 0.22, 16);
+    ctx.fill();
 
     ctx.fillStyle = "#FFF";
-    ctx.font = `bold ${Math.floor(W * 0.05)}px Arial`;
+    ctx.font = `bold ${Math.floor(W * 0.055)}px Arial`;
     ctx.fillText("Score: " + score, W / 2, H * 0.35);
 
     ctx.fillStyle = "#FFD54F";
     ctx.font = `${Math.floor(W * 0.04)}px Arial`;
-    ctx.fillText("Best: " + data.highScore, W / 2, H * 0.42);
+    ctx.fillText("Best: " + data.highScore, W / 2, H * 0.41);
 
     ctx.fillStyle = "#FFD700";
-    ctx.fillText("Coins: +" + (data._sessionCoins || 0), W / 2, H * 0.49);
+    ctx.fillText("Coins: +" + sessionCoins, W / 2, H * 0.47);
 
     // Retry
-    const btnW = W * 0.55;
-    const btnH = H * 0.07;
+    const btnW = W * 0.6;
+    const btnH = H * 0.065;
     const btnX = W / 2 - btnW / 2;
-    const btnY = H * 0.58;
+    const btnY = H * 0.56;
     ctx.fillStyle = "#00E676";
-    drawRoundRect(btnX, btnY, btnW, btnH, 12);
+    ctx.shadowColor = "#00E676";
+    ctx.shadowBlur = 12;
+    drawRoundRect(btnX, btnY, btnW, btnH, 14);
     ctx.fill();
+    ctx.shadowBlur = 0;
     ctx.fillStyle = "#FFF";
     ctx.font = `bold ${Math.floor(W * 0.05)}px Arial`;
     ctx.fillText("RETRY", W / 2, btnY + btnH / 2 + 2);
+    menuButtons.retry = { x: btnX, y: btnY, w: btnW, h: btnH };
 
     // Menu
-    const mbtnY = H * 0.7;
+    const mbtnY = H * 0.66;
     ctx.fillStyle = "#546E7A";
-    drawRoundRect(btnX, mbtnY, btnW, btnH, 12);
+    drawRoundRect(btnX, mbtnY, btnW, btnH, 14);
     ctx.fill();
     ctx.fillStyle = "#FFF";
     ctx.font = `bold ${Math.floor(W * 0.045)}px Arial`;
     ctx.fillText("MENU", W / 2, mbtnY + btnH / 2 + 2);
-
-    menuButtons.retry = { x: btnX, y: btnY, w: btnW, h: btnH };
     menuButtons.menu = { x: btnX, y: mbtnY, w: btnW, h: btnH };
   }
 
   // --- Shop ---
   let shopScroll = 0;
+  let shopTouchStartY = 0;
+  let shopLastY = 0;
 
   function drawShop() {
-    ctx.fillStyle = "#1a1a2e";
+    ctx.fillStyle = "#0f0f20";
     ctx.fillRect(0, 0, W, H);
+
+    // Header
+    ctx.fillStyle = "rgba(0,0,0,0.5)";
+    ctx.fillRect(0, 0, W, 90);
 
     ctx.fillStyle = "#FFF";
     ctx.font = `bold ${Math.floor(W * 0.07)}px Arial`;
     ctx.textAlign = "center";
-    ctx.fillText("SHOP", W / 2, 50);
+    ctx.fillText("SHOP", W / 2, 42);
 
     ctx.fillStyle = "#FFD700";
-    ctx.font = `${Math.floor(W * 0.04)}px Arial`;
-    ctx.fillText("Coins: " + data.coins, W / 2, 85);
+    ctx.font = `${Math.floor(W * 0.035)}px Arial`;
+    ctx.fillText("Coins: " + data.coins, W / 2, 72);
 
-    // Back button
-    const backW = 80;
-    const backH = 36;
+    // Back
     ctx.fillStyle = "#546E7A";
-    drawRoundRect(15, 15, backW, backH, 8);
+    drawRoundRect(12, 14, 70, 32, 8);
     ctx.fill();
     ctx.fillStyle = "#FFF";
-    ctx.font = `bold ${Math.floor(W * 0.035)}px Arial`;
-    ctx.textAlign = "center";
-    ctx.fillText("BACK", 55, 38);
-    menuButtons.shopBack = { x: 15, y: 15, w: backW, h: backH };
+    ctx.font = `bold ${Math.floor(W * 0.032)}px Arial`;
+    ctx.fillText("BACK", 47, 35);
+    menuButtons.shopBack = { x: 12, y: 14, w: 70, h: 32 };
 
     // Skin cards
-    const cardW = W * 0.8;
-    const cardH = 80;
-    const startY = 110 - shopScroll;
+    const cardW = W * 0.85;
+    const cardH = 90;
+    const startY = 105 - shopScroll;
     const gap = 10;
 
     menuButtons.skinCards = [];
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 90, W, H - 90);
+    ctx.clip();
 
     for (let i = 0; i < SKINS.length; i++) {
       const skin = SKINS[i];
@@ -842,53 +1237,44 @@
       const owned = data.skins.includes(skin.id);
       const equipped = data.currentSkin === skin.id;
 
-      // Card bg
-      ctx.fillStyle = equipped ? "#1B5E20" : owned ? "#263238" : "#37474F";
-      drawRoundRect((W - cardW) / 2, cy, cardW, cardH, 10);
+      ctx.fillStyle = equipped ? "#1B5E20" : owned ? "#1a1a35" : "#252545";
+      drawRoundRect((W - cardW) / 2, cy, cardW, cardH, 12);
       ctx.fill();
 
       if (equipped) {
         ctx.strokeStyle = "#00E676";
         ctx.lineWidth = 2;
-        drawRoundRect((W - cardW) / 2, cy, cardW, cardH, 10);
+        drawRoundRect((W - cardW) / 2, cy, cardW, cardH, 12);
         ctx.stroke();
       }
 
-      // Mini bike preview
-      const previewSkin = skin;
-      ctx.save();
-      const px = (W - cardW) / 2 + 45;
-      const py = cy + cardH / 2;
-      drawBike(px, py, 22, 35, previewSkin);
-      ctx.restore();
+      // Mini bike
+      drawMiniBike((W - cardW) / 2 + 40, cy + cardH / 2 + 5, 1.3, skin);
 
       // Name
       ctx.fillStyle = "#FFF";
-      ctx.font = `bold ${Math.floor(W * 0.04)}px Arial`;
+      ctx.font = `bold ${Math.floor(W * 0.042)}px Arial`;
       ctx.textAlign = "left";
-      ctx.fillText(skin.name, (W - cardW) / 2 + 80, cy + 32);
+      ctx.fillText(skin.name, (W - cardW) / 2 + 75, cy + 35);
 
-      // Status
-      ctx.font = `${Math.floor(W * 0.033)}px Arial`;
+      ctx.font = `${Math.floor(W * 0.032)}px Arial`;
       if (equipped) {
         ctx.fillStyle = "#00E676";
-        ctx.fillText("EQUIPPED", (W - cardW) / 2 + 80, cy + 55);
+        ctx.fillText("EQUIPPED", (W - cardW) / 2 + 75, cy + 60);
       } else if (owned) {
         ctx.fillStyle = "#90CAF9";
-        ctx.fillText("TAP TO EQUIP", (W - cardW) / 2 + 80, cy + 55);
+        ctx.fillText("TAP TO EQUIP", (W - cardW) / 2 + 75, cy + 60);
       } else {
-        ctx.fillStyle = "#FFD700";
-        ctx.fillText(skin.price + " coins", (W - cardW) / 2 + 80, cy + 55);
+        ctx.fillStyle = data.coins >= skin.price ? "#FFD700" : "#FF5252";
+        ctx.fillText(skin.price + " coins", (W - cardW) / 2 + 75, cy + 60);
       }
 
       menuButtons.skinCards.push({
-        x: (W - cardW) / 2,
-        y: cy,
-        w: cardW,
-        h: cardH,
-        skinId: skin.id,
+        x: (W - cardW) / 2, y: cy, w: cardW, h: cardH, skinId: skin.id,
       });
     }
+
+    ctx.restore();
   }
 
   // --- Render ---
@@ -897,34 +1283,35 @@
 
     if (state === STATE.MENU) {
       drawMenu();
-    } else if (state === STATE.PLAYING) {
-      drawBackground();
-      // Draw items
-      for (const it of items) {
-        if (it.type === "coin") drawCoin(it);
-        else drawShieldItem(it);
+    } else if (state === STATE.PLAYING || state === STATE.GAMEOVER) {
+      drawSky();
+      drawRoad();
+
+      // Collect all world objects, sort by z (far first)
+      const allObjects = [];
+      for (const o of worldObstacles) allObjects.push({ ...o, kind: "obstacle" });
+      for (const it of worldItems) allObjects.push({ ...it, kind: "item" });
+      allObjects.push({ kind: "player", z: 8 });
+      allObjects.sort((a, b) => b.z - a.z);
+
+      for (const obj of allObjects) {
+        if (obj.kind === "player") {
+          drawPlayerBike(getSkin(data.currentSkin));
+        } else if (obj.kind === "obstacle") {
+          if (obj.type === "car") draw3DCar(obj.x, obj.z, obj.carColor);
+          else if (obj.type === "cone") draw3DCone(obj.x, obj.z);
+          else if (obj.type === "box") draw3DBox(obj.x, obj.z);
+          else if (obj.type === "oil") draw3DOil(obj.x, obj.z);
+        } else if (obj.kind === "item") {
+          if (obj.type === "coin") draw3DCoin(obj.x, obj.z, obj.bobPhase);
+          else draw3DShield(obj.x, obj.z, obj.bobPhase);
+        }
       }
-      // Draw obstacles
-      for (const o of obstacles) {
-        if (o.type === "car") drawCar(o);
-        else if (o.type === "cone") drawCone(o);
-        else if (o.type === "box") drawBox(o);
-        else if (o.type === "oil") drawOil(o);
-      }
-      // Player
-      drawBike(player.x, player.y, player.w, player.h, player.skin);
+
       drawParticles();
       drawHUD();
-    } else if (state === STATE.GAMEOVER) {
-      drawBackground();
-      for (const o of obstacles) {
-        if (o.type === "car") drawCar(o);
-        else if (o.type === "cone") drawCone(o);
-        else if (o.type === "box") drawBox(o);
-        else if (o.type === "oil") drawOil(o);
-      }
-      drawParticles();
-      drawGameOver();
+
+      if (state === STATE.GAMEOVER) drawGameOver();
     } else if (state === STATE.SHOP) {
       drawShop();
     }
@@ -957,7 +1344,7 @@
 
     if (state === STATE.MENU) {
       if (inBtn(pos, menuButtons.play)) {
-        data._sessionCoins = 0;
+        sessionCoins = 0;
         initGame();
         state = STATE.PLAYING;
       } else if (inBtn(pos, menuButtons.shop)) {
@@ -966,11 +1353,10 @@
       }
     } else if (state === STATE.PLAYING) {
       touchStartX = pos.x;
-      touchCurrentX = pos.x;
       isDragging = true;
     } else if (state === STATE.GAMEOVER) {
       if (inBtn(pos, menuButtons.retry)) {
-        data._sessionCoins = 0;
+        sessionCoins = 0;
         initGame();
         state = STATE.PLAYING;
       } else if (inBtn(pos, menuButtons.menu)) {
@@ -981,7 +1367,6 @@
         state = STATE.MENU;
         return;
       }
-      // Skin cards
       if (menuButtons.skinCards) {
         for (const card of menuButtons.skinCards) {
           if (inBtn(pos, card)) {
@@ -1000,35 +1385,26 @@
           }
         }
       }
-      // Store touch for scrolling
-      touchStartX = pos.x;
-      touchCurrentX = pos.x;
       isDragging = true;
       shopTouchStartY = pos.y;
       shopLastY = pos.y;
     }
   }
 
-  let shopTouchStartY = 0;
-  let shopLastY = 0;
-
   function handleMove(e) {
     e.preventDefault();
     const pos = getPos(e);
 
     if (state === STATE.PLAYING && isDragging) {
-      touchCurrentX = pos.x;
-      const delta = touchCurrentX - touchStartX;
-      playerTargetX = player.x + delta * 0.3;
-      playerTargetX = Math.max(
-        ROAD_LEFT + player.w / 2 + 5,
-        Math.min(ROAD_RIGHT - player.w / 2 - 5, playerTargetX)
-      );
-      touchStartX = touchCurrentX;
+      const delta = pos.x - touchStartX;
+      // Map screen drag to road position
+      playerTargetX += delta / (W * 0.35);
+      playerTargetX = Math.max(-1, Math.min(1, playerTargetX));
+      touchStartX = pos.x;
     } else if (state === STATE.SHOP && isDragging) {
       const dy = shopLastY - pos.y;
       shopScroll += dy;
-      shopScroll = Math.max(0, Math.min(shopScroll, SKINS.length * 90 - H + 150));
+      shopScroll = Math.max(0, Math.min(shopScroll, SKINS.length * 100 - H + 200));
       shopLastY = pos.y;
     }
   }
@@ -1039,46 +1415,50 @@
     touchStartX = null;
   }
 
-  // Mouse support
   canvas.addEventListener("mousedown", handleStart);
   canvas.addEventListener("mousemove", handleMove);
   canvas.addEventListener("mouseup", handleEnd);
-
-  // Touch support
   canvas.addEventListener("touchstart", handleStart, { passive: false });
   canvas.addEventListener("touchmove", handleMove, { passive: false });
   canvas.addEventListener("touchend", handleEnd, { passive: false });
 
-  // Keyboard support
+  // Keyboard
+  const keysDown = {};
   document.addEventListener("keydown", (e) => {
-    if (state === STATE.PLAYING) {
-      if (e.key === "ArrowLeft" || e.key === "a") {
-        playerTargetX -= LANE_WIDTH * 0.6;
-        playerTargetX = Math.max(ROAD_LEFT + player.w / 2 + 5, playerTargetX);
-      } else if (e.key === "ArrowRight" || e.key === "d") {
-        playerTargetX += LANE_WIDTH * 0.6;
-        playerTargetX = Math.min(ROAD_RIGHT - player.w / 2 - 5, playerTargetX);
-      }
-    } else if (state === STATE.MENU) {
-      if (e.key === "Enter" || e.key === " ") {
-        data._sessionCoins = 0;
-        initGame();
-        state = STATE.PLAYING;
-      }
+    keysDown[e.key] = true;
+    if (state === STATE.MENU && (e.key === "Enter" || e.key === " ")) {
+      sessionCoins = 0;
+      initGame();
+      state = STATE.PLAYING;
     } else if (state === STATE.GAMEOVER) {
       if (e.key === "Enter" || e.key === " ") {
-        data._sessionCoins = 0;
+        sessionCoins = 0;
         initGame();
         state = STATE.PLAYING;
       } else if (e.key === "Escape") {
         state = STATE.MENU;
       }
-    } else if (state === STATE.SHOP) {
-      if (e.key === "Escape") {
-        state = STATE.MENU;
-      }
+    } else if (state === STATE.SHOP && e.key === "Escape") {
+      state = STATE.MENU;
     }
   });
+  document.addEventListener("keyup", (e) => { keysDown[e.key] = false; });
+
+  // Continuous keyboard steering
+  function keyboardSteering() {
+    if (state === STATE.PLAYING) {
+      if (keysDown["ArrowLeft"] || keysDown["a"]) {
+        playerTargetX -= 0.035;
+        playerTargetX = Math.max(-1, playerTargetX);
+      }
+      if (keysDown["ArrowRight"] || keysDown["d"]) {
+        playerTargetX += 0.035;
+        playerTargetX = Math.min(1, playerTargetX);
+      }
+    }
+    requestAnimationFrame(keyboardSteering);
+  }
+  keyboardSteering();
 
   // --- Start ---
   loop();
